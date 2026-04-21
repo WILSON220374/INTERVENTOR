@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import GameCanvas from './GameCanvas.tsx';
+import LoginScreen from './LoginScreen';
+import SupervisorDashboard from './SupervisorDashboard';
+import { supabase } from './supabaseClient';
 import './App.css';
 
 interface Notif { id: number; icon: string; text: string; }
@@ -96,7 +99,11 @@ const BS: React.CSSProperties = {
 };
 
 export default function App() {
-  const [view, setView] = useState<'setup'|'game'>('setup');
+  const [view, setView] = useState<'login'|'setup'|'game'|'supervisor'>('login');
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentRole, setCurrentRole] = useState<string>('player');
+  const isSupervisor = currentUser?.email === 'supervisor@constructor.co';
+  const [viewingAsPlayer, setViewingAsPlayer] = useState<{id: string; email: string} | null>(null);
   const [projectForm, setProjectForm] = useState<ProjectFormState>(INITIAL_FORM);
   const [notifs, setNotifs] = useState<Notif[]>([]);
   const [gameHourDisplay, setGameHourDisplay] = useState('Día 1 - 07:00');
@@ -144,6 +151,78 @@ export default function App() {
   const enObraAudioRef = useRef<HTMLAudioElement | null>(null);
   const nocheAudioRef = useRef<HTMLAudioElement | null>(null);
   const lluviaAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Cargar pagos e incidencias de Supabase para el jugador
+  useEffect(() => {
+    if (!currentUser) return;
+    // Si es supervisor y no está viendo partida de un grupo, no cargar
+    if (isSupervisor && !viewingAsPlayer) return;
+
+    const targetUserId = isSupervisor && viewingAsPlayer ? viewingAsPlayer.id : currentUser.id;
+
+    async function loadFromSupabase() {
+      // Cargar pagos
+      const { data: payments } = await supabase
+        .from('game_payments')
+        .select('*')
+        .eq('user_id', targetUserId)
+        .order('created_at');
+
+      if (payments && payments.length > 0) {
+        const cols = payments.map((p: any) => ({ id: p.id, label: p.payment_label }));
+        const globales: Record<string, number> = {};
+        for (const p of payments) {
+          globales[p.id] = p.amount;
+        }
+        setProjectForm(prev => ({
+          ...prev,
+          pagosCols: cols,
+          pagosGlobales: globales,
+          actividades: prev.actividades.map(a => ({
+            ...a,
+            pagos: {
+              ...Object.fromEntries(cols.map((c: any) => [c.id, a.pagos?.[c.id] || 0])),
+            },
+            asignado: cols.reduce((sum: number, c: any) => sum + (Number(a.pagos?.[c.id]) || 0), 0),
+          })),
+        }));
+      }
+
+      // Cargar incidencias
+      const { data: incidents } = await supabase
+        .from('game_incidents')
+        .select('*')
+        .eq('user_id', targetUserId);
+
+      if (incidents) {
+        for (const inc of incidents) {
+          if (inc.incident_type === 'manifestacion_comunidad') {
+            setManifestacionComunidadActiva(inc.is_active);
+            if (inc.is_active) setManifestacionComunidadPendiente(true);
+          }
+          if (inc.incident_type === 'demora_materiales') {
+            setDemoraMaterialesActiva(inc.is_active);
+            if (inc.is_active) setDemoraMaterialesPendiente(true);
+          }
+          if (inc.incident_type === 'accidente_obra') {
+            setAccidenteObraActiva(inc.is_active);
+            if (inc.is_active) setAccidenteObraPendiente(true);
+          }
+          if (inc.incident_type === 'lluvia_intensa') {
+            setLluviaIntensaActiva(inc.is_active);
+          }
+          if (inc.incident_type === 'derrumbe') {
+            setDerrumbeActivo(inc.is_active);
+            if (inc.is_active) setDerrumbePendiente(true);
+          }
+        }
+      }
+    }
+
+    loadFromSupabase();
+    const interval = setInterval(loadFromSupabase, 5000);
+    return () => clearInterval(interval);
+  }, [currentUser, isSupervisor, viewingAsPlayer]);
 
   function pushNotif(icon: string, text: string) {
     const id = ++nidRef.current;
@@ -266,8 +345,17 @@ function resolverManifestacionComunidad() {
 
   setManifestacionComunidadPendiente(false);
   setManifestacionComunidadResuelta(true);
+  setManifestacionComunidadActiva(false);
   setSuspended(false);
   pushNotif('🤝', 'Manifestación de la comunidad solucionada.');
+
+  if (currentUser) {
+    supabase.from('game_incidents')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('user_id', currentUser.id)
+      .eq('incident_type', 'manifestacion_comunidad')
+      .then();
+  }
 }
   function resolverDemoraMateriales() {
     if (!demoraMaterialesPendiente) return;
@@ -278,8 +366,17 @@ function resolverManifestacionComunidad() {
 
     setDemoraMaterialesPendiente(false);
     setDemoraMaterialesResuelta(true);
+    setDemoraMaterialesActiva(false);
     setSuspended(false);
     pushNotif('📦', 'Demora en los materiales solucionada.');
+
+    if (currentUser) {
+      supabase.from('game_incidents')
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq('user_id', currentUser.id)
+        .eq('incident_type', 'demora_materiales')
+        .then();
+    }
   }
 
   function resolverAccidenteObra() {
@@ -291,8 +388,17 @@ function resolverManifestacionComunidad() {
 
     setAccidenteObraPendiente(false);
     setAccidenteObraResuelta(true);
+    setAccidenteObraActiva(false);
     setSuspended(false);
     pushNotif('🚑', 'Accidente en la obra solucionado.');
+
+    if (currentUser) {
+      supabase.from('game_incidents')
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq('user_id', currentUser.id)
+        .eq('incident_type', 'accidente_obra')
+        .then();
+    }
   }
 
   function resolverDerrumbe() {
@@ -905,6 +1011,38 @@ function resolverManifestacionComunidad() {
   const hayActividadesConRecursos = projectForm.actividades.some(a => Number(a.asignado) > 0);
   const canStart = actividadesOk && !!projectForm.proyectoNombre && !!projectForm.contratistaNombre && totalPagos > 0 && hayActividadesConRecursos;
 
+  if (view === 'login') {
+    return (
+      <LoginScreen onLogin={(user, role) => {
+        setCurrentUser(user);
+        setCurrentRole(role);
+        if (user.email === 'supervisor@constructor.co') {
+          setView('supervisor');
+        } else {
+          setView('setup');
+        }
+      }} />
+    );
+  }
+
+  if (view === 'supervisor') {
+    return (
+      <SupervisorDashboard
+        currentUser={currentUser}
+        onLogout={async () => {
+          await supabase.auth.signOut();
+          setCurrentUser(null);
+          setCurrentRole('player');
+          setView('login');
+        }}
+        onViewGame={(player) => {
+          setViewingAsPlayer(player);
+          setView('game');
+        }}
+      />
+    );
+  }
+
   if (view === 'setup') {
     return (
       <div
@@ -1002,6 +1140,7 @@ function resolverManifestacionComunidad() {
                 Regresar a la obra
               </button>
 
+              {isSupervisor && (
               <button
                 onClick={toggleSuspend}
                 disabled={!gameStarted || obraFinished}
@@ -1009,12 +1148,22 @@ function resolverManifestacionComunidad() {
               >
                 {suspended ? 'Reanudar' : 'Suspender'}
               </button>
+              )}
 
+              {isSupervisor && (
               <button
                 onClick={() => resetGameState(true)}
                 style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#475569', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
               >
                 Reiniciar
+              </button>
+              )}
+
+              <button
+                onClick={async () => { await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setView('login'); }}
+                style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
+              >
+                Guardar y salir
               </button>
             </div>
           </div>
@@ -1089,6 +1238,7 @@ function resolverManifestacionComunidad() {
             {actividadesOk && <div style={{ marginTop:'8px', padding:'8px 12px', borderRadius:'8px', background:'#0a2e1a', fontSize:'12px', color:'#4ade80' }}>✓ Actividades = valor del contrato</div>}
           </div>
 
+          {isSupervisor && (<>
           <div style={{ ...SS, marginTop:'20px' }}>
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'14px', flexWrap:'wrap', gap:'12px' }}>
               <h2 style={{ marginTop:0, marginBottom:0 }}>CREAR PAGOS</h2>
@@ -1142,8 +1292,14 @@ function resolverManifestacionComunidad() {
                 </tbody>
               </table>
             </div>
+          </div>
+          </>)}
 
-            <div style={{ overflowX:'auto' }}>
+          <div style={{ ...SS, marginTop:'20px' }}>
+            <h2 style={{ marginTop:0, marginBottom:0 }}>DISTRIBUCIÓN DE RECURSOS</h2>
+            <p style={{ fontSize:'12px', color:'#94a3b8', marginBottom:'14px' }}>
+              {isSupervisor ? 'Asigna recursos a cada actividad' : projectForm.pagosCols.length <= 1 && !projectForm.pagosGlobales[projectForm.pagosCols[0]?.id] ? 'Esperando pagos del supervisor...' : 'Distribuye los recursos recibidos entre las actividades'}
+            </p>
               <table style={{ width:'100%', borderCollapse:'collapse', minWidth:'760px' }}>
                 <thead>
                   <tr style={{ color:'#e5e7eb', fontWeight:700, fontSize:'13px' }}>
@@ -1191,7 +1347,6 @@ function resolverManifestacionComunidad() {
                   ))}
                 </tbody>
               </table>
-            </div>
 
             <div style={{ marginTop:'14px', paddingTop:'12px', borderTop:'1px solid #334155', display:'flex', justifyContent:'space-between', fontWeight:700 }}>
               <span>Total recursos asignados</span>
@@ -1201,6 +1356,7 @@ function resolverManifestacionComunidad() {
             </div>
           </div>
 
+          {isSupervisor && (<>
           <div style={{ ...SS, marginTop:'20px' }}>
             <h2 style={{ marginTop:0, marginBottom:'14px' }}>Incidencias de obra</h2>
 
@@ -1290,6 +1446,7 @@ function resolverManifestacionComunidad() {
               </label>
             </div>
           </div>
+          </>)}
         </div>
       </div>
     );
@@ -1316,6 +1473,8 @@ function resolverManifestacionComunidad() {
         <button onClick={() => setView('setup')} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#0f172a', color:'#fff', fontWeight:700, cursor:'pointer', boxShadow:'0 6px 16px rgba(0,0,0,0.3)', fontSize:'12px' }}>
           ← Configuración
         </button>
+        {isSupervisor && (
+        <>
         <button onClick={() => changeTimeScale(1)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===1?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
           x1
         </button>
@@ -1324,6 +1483,16 @@ function resolverManifestacionComunidad() {
         </button>
         <button onClick={() => changeTimeScale(500)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===500?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
           x500
+        </button>
+        </>
+        )}
+        {isSupervisor && viewingAsPlayer && (
+        <button onClick={() => { setViewingAsPlayer(null); setView('supervisor'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#7c3aed', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+          ← Volver al panel
+        </button>
+        )}
+        <button onClick={async () => { await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setViewingAsPlayer(null); setView('login'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+          Guardar y salir
         </button>
       </div>
 
