@@ -166,11 +166,15 @@ export default function SupervisorDashboard({ currentUser, onLogout, onViewGame 
   // Reiniciar juego de un jugador
   async function resetPlayer() {
     if (!selectedPlayer) return;
-    if (!confirm(`¿Reiniciar el juego de ${selectedPlayer.email}?`)) return;
+    if (!confirm(`¿Reiniciar el juego de ${selectedPlayer.email}? Se borrará toda la configuración y avance.`)) return;
 
     await supabase
       .from('game_state')
-      .update({ is_reset: true, updated_at: new Date().toISOString() })
+      .update({
+        project_data: { email: selectedPlayer.email },
+        is_reset: true,
+        updated_at: new Date().toISOString(),
+      })
       .eq('user_id', selectedPlayer.id);
 
     await supabase.from('game_payments').delete().eq('user_id', selectedPlayer.id);
@@ -178,7 +182,7 @@ export default function SupervisorDashboard({ currentUser, onLogout, onViewGame 
 
     setPayments([]);
     setIncidents([]);
-    alert(`Juego de ${selectedPlayer.email} reiniciado`);
+    alert(`Juego de ${selectedPlayer.email} reiniciado completamente`);
   }
 
   function isIncidentActive(type: string): boolean {
@@ -249,12 +253,20 @@ export default function SupervisorDashboard({ currentUser, onLogout, onViewGame 
                   <h2 style={{ margin: 0, fontSize: '18px' }}>
                     {selectedPlayer.email.split('@')[0].toUpperCase()}
                   </h2>
-                  <button
-                    onClick={resetPlayer}
-                    style={{ ...BS, background: '#dc2626', border: 'none' }}
-                  >
-                    Reiniciar juego
-                  </button>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={() => onViewGame(selectedPlayer)}
+                      style={{ ...BS, background: '#2563eb', border: 'none' }}
+                    >
+                      Ver partida
+                    </button>
+                    <button
+                      onClick={resetPlayer}
+                      style={{ ...BS, background: '#dc2626', border: 'none' }}
+                    >
+                      Reiniciar juego
+                    </button>
+                  </div>
                 </div>
               </div>
 

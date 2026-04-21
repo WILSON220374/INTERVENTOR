@@ -137,6 +137,7 @@ export default function App() {
   const [derrumbePendiente, setDerrumbePendiente] = useState(false);
   const [derrumbeResuelto, setDerrumbeResuelto] = useState(false);
   const startRef = useRef(Date.now());
+  const gameStartedAtRef = useRef(0);
   const nidRef = useRef(0);
   const suspendedTimeRef = useRef(0);
   const suspendStartRef = useRef(0);
@@ -151,6 +152,7 @@ export default function App() {
   const enObraAudioRef = useRef<HTMLAudioElement | null>(null);
   const nocheAudioRef = useRef<HTMLAudioElement | null>(null);
   const lluviaAudioRef = useRef<HTMLAudioElement | null>(null);
+  const loadedRef = useRef(false);
 
   // Cargar pagos e incidencias de Supabase para el jugador
   useEffect(() => {
@@ -270,6 +272,7 @@ export default function App() {
 
   function resetGameState(showNotif = false) {
     startRef.current = Date.now();
+    gameStartedAtRef.current = 0;
     suspendedTimeRef.current = 0;
     suspendStartRef.current = 0;
     accumulatedGameMsRef.current = 0;
@@ -311,6 +314,93 @@ export default function App() {
     setDerrumbeResuelto(false);
     if (showNotif) pushNotif('🔄', 'Proyecto reiniciado');
   }
+
+  // ============ PERSISTENCIA EN SUPABASE ============
+
+  async function saveGameState() {
+    if (!currentUser || isSupervisor) return;
+
+    // Calcular el tiempo de juego TOTAL incluyendo la sesión actual
+    const currentGameMs = accumulatedGameMsRef.current + (Date.now() - lastRealTickRef.current) * 12 * timeScale;
+    // Actualizar refs para que el juego siga correctamente
+    accumulatedGameMsRef.current = currentGameMs;
+    lastRealTickRef.current = Date.now();
+
+    const state = {
+      email: currentUser.email,
+      projectForm,
+      gameStarted,
+      startTile,
+      accumulatedGameMs: currentGameMs,
+      roadProgress,
+      projectProgress,
+      workDays,
+      score,
+      suspended,
+      obraFinished,
+      recursosAgotados,
+      timeScale,
+      liveActs,
+      suspendedTime: suspendedTimeRef.current,
+      cambiosContratoValor: cambiosContratoValorRef.current,
+      cambiosContratoDuracion: cambiosContratoDuracionRef.current,
+      gameStartedAt: gameStartedAtRef.current,
+      lastSavedAt: Date.now(),
+    };
+    await supabase
+      .from('game_state')
+      .update({ project_data: state, updated_at: new Date().toISOString() })
+      .eq('user_id', currentUser.id);
+  }
+
+  function loadGameState(data: any) {
+    if (!data) return;
+    loadedRef.current = true;
+    if (data.projectForm) setProjectForm(data.projectForm);
+    if (data.gameStarted !== undefined) setGameStarted(data.gameStarted);
+    if (data.startTile !== undefined) setStartTile(data.startTile);
+    if (data.roadProgress !== undefined) setRoadProgress(data.roadProgress);
+    if (data.projectProgress !== undefined) setProjectProgress(data.projectProgress);
+    if (data.workDays !== undefined) setWorkDays(data.workDays);
+    if (data.score !== undefined) setScore(data.score);
+    if (data.suspended !== undefined) setSuspended(data.suspended);
+    if (data.obraFinished !== undefined) setObraFinished(data.obraFinished);
+    if (data.recursosAgotados !== undefined) setRecursosAgotados(data.recursosAgotados);
+    if (data.timeScale !== undefined) setTimeScale(data.timeScale);
+    if (data.liveActs) setLiveActs(data.liveActs);
+    if (data.suspendedTime !== undefined) suspendedTimeRef.current = data.suspendedTime;
+    if (data.cambiosContratoValor !== undefined) cambiosContratoValorRef.current = data.cambiosContratoValor;
+    if (data.cambiosContratoDuracion !== undefined) cambiosContratoDuracionRef.current = data.cambiosContratoDuracion;
+    if (data.gameStartedAt) gameStartedAtRef.current = data.gameStartedAt;
+
+    // Calcular tiempo offline y avanzar el juego
+    const savedMs = data.accumulatedGameMs || 0;
+    if (data.lastSavedAt && data.gameStarted && !data.obraFinished) {
+      const offlineRealMs = Date.now() - data.lastSavedAt;
+      if (data.suspended || data.recursosAgotados) {
+        // Juego estaba detenido: el tiempo offline se suma como tiempo suspendido
+        suspendedTimeRef.current = (data.suspendedTime || 0) + offlineRealMs;
+        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 12);
+      } else {
+        // Juego estaba corriendo: avanzar normalmente (velocidad x1)
+        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 12);
+      }
+    } else {
+      accumulatedGameMsRef.current = savedMs;
+    }
+
+    lastRealTickRef.current = Date.now();
+    startRef.current = Date.now();
+  }
+
+  // Auto-guardar cada 10 segundos
+  useEffect(() => {
+    if (!currentUser || isSupervisor || !gameStarted) return;
+    const interval = setInterval(saveGameState, 10000);
+    return () => clearInterval(interval);
+  }, [currentUser, isSupervisor, gameStarted, projectForm, roadProgress, score, workDays, liveActs, obraFinished, suspended]);
+
+  // ============ FIN PERSISTENCIA ============
 
   function toggleSuspend() {
   if (!gameStarted || obraFinished) return;
@@ -406,6 +496,18 @@ function resolverManifestacionComunidad() {
   }
 
   useEffect(() => {
+    if (gameStarted) {
+      // Solo actualizar asignado, NUNCA tocar avance/invertido
+      setLiveActs(prev =>
+        prev.map(act => {
+          const formAct = projectForm.actividades.find(a => a.id === act.id);
+          if (!formAct) return act;
+          const asignado = projectForm.pagosCols.reduce((sum, col) => sum + (Number(formAct.pagos?.[col.id]) || 0), 0);
+          return { ...act, asignado };
+        })
+      );
+      return;
+    }
     syncLiveActsWithForm();
   }, [projectForm.actividades, projectForm.pagosCols, projectForm.pagosGlobales]);
   
@@ -665,7 +767,7 @@ function resolverManifestacionComunidad() {
     const iv = setInterval(() => {
       if (!gameStarted || !startTile || obraFinished) return;
 
-      const realEl = Date.now() - startRef.current;
+      const realEl = gameStartedAtRef.current > 0 ? Date.now() - gameStartedAtRef.current : 0;
       const eh = Math.floor(realEl / 3600000);
       const em = Math.floor((realEl % 3600000) / 60000);
       const es = Math.floor((realEl % 60000) / 1000);
@@ -1013,12 +1115,30 @@ function resolverManifestacionComunidad() {
 
   if (view === 'login') {
     return (
-      <LoginScreen onLogin={(user, role) => {
+      <LoginScreen onLogin={async (user, role) => {
         setCurrentUser(user);
         setCurrentRole(role);
         if (user.email === 'supervisor@constructor.co') {
           setView('supervisor');
         } else {
+          // Cargar estado guardado
+          const { data: stateRow } = await supabase
+            .from('game_state')
+            .select('project_data, is_reset')
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          if (stateRow?.is_reset) {
+            // El supervisor reinició este grupo — empezar de cero
+            resetGameState(false);
+            setProjectForm(INITIAL_FORM);
+            await supabase
+              .from('game_state')
+              .update({ is_reset: false, updated_at: new Date().toISOString() })
+              .eq('user_id', user.id);
+          } else if (stateRow?.project_data && stateRow.project_data.gameStarted !== undefined) {
+            loadGameState(stateRow.project_data);
+          }
           setView('setup');
         }
       }} />
@@ -1035,9 +1155,23 @@ function resolverManifestacionComunidad() {
           setCurrentRole('player');
           setView('login');
         }}
-        onViewGame={(player) => {
+        onViewGame={async (player) => {
           setViewingAsPlayer(player);
-          setView('game');
+          // Cargar el estado del juego de este grupo
+          const { data: stateRow } = await supabase
+            .from('game_state')
+            .select('project_data')
+            .eq('user_id', player.id)
+            .maybeSingle();
+          if (stateRow?.project_data && stateRow.project_data.gameStarted !== undefined) {
+            loadGameState(stateRow.project_data);
+            setView('game');
+          } else if (stateRow?.project_data?.projectForm) {
+            loadGameState(stateRow.project_data);
+            setView('setup');
+          } else {
+            setView('setup');
+          }
         }}
       />
     );
@@ -1058,9 +1192,22 @@ function resolverManifestacionComunidad() {
             <div>
               <h1 style={{ margin:0, fontSize:'28px' }}>Configuración inicial del proyecto</h1>
               <p style={{ margin:'8px 0 0 0', color:'#94a3b8' }}>Registra la información base antes de entrar al juego.</p>
+              {isSupervisor && viewingAsPlayer && (
+                <p style={{ margin:'4px 0 0 0', color:'#facc15', fontSize:'13px', fontWeight:700 }}>
+                  Viendo partida de: {viewingAsPlayer.email.split('@')[0].toUpperCase()}
+                </p>
+              )}
             </div>
 
             <div style={{ display:'flex', gap:'8px', flexWrap:'wrap', justifyContent:'flex-end', alignItems:'flex-end', flexDirection:'column' }}>
+              {isSupervisor && viewingAsPlayer && (
+                <button
+                  onClick={() => { setViewingAsPlayer(null); setView('supervisor'); }}
+                  style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#7c3aed', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
+                >
+                  ← Volver al panel
+                </button>
+              )}
               <button
                 onClick={() => {
                   if (canStart && !gameStarted) {
@@ -1075,6 +1222,7 @@ function resolverManifestacionComunidad() {
                     accumulatedGameMsRef.current = 0;
                     lastRealTickRef.current = Date.now();
                     startRef.current = Date.now();
+                    gameStartedAtRef.current = Date.now();
                     setElapsed('00:00:00');
                     setGameHourDisplay('Día 1 - 07:00');
                     setWorkDays(0);
@@ -1160,7 +1308,7 @@ function resolverManifestacionComunidad() {
               )}
 
               <button
-                onClick={async () => { await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setView('login'); }}
+                onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setView('login'); }}
                 style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
               >
                 Guardar y salir
@@ -1491,13 +1639,18 @@ function resolverManifestacionComunidad() {
           ← Volver al panel
         </button>
         )}
-        <button onClick={async () => { await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setViewingAsPlayer(null); setView('login'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+        <button onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setViewingAsPlayer(null); setView('login'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
           Guardar y salir
         </button>
       </div>
 
       <div style={{ position:'absolute', top:16, left:'50%', transform:'translateX(-50%)', background:'rgba(12,20,32,0.93)', color:'#fff', padding:'12px 24px', borderRadius:'10px', zIndex:3, textAlign:'center', minWidth:'380px', fontSize:'13px' }}>
         <div style={{ fontSize:'17px', fontWeight:700, marginBottom:'4px', color:'#facc15' }}>{projectForm.proyectoNombre || 'Sin nombre'}</div>
+        {isSupervisor && viewingAsPlayer && (
+          <div style={{ fontSize:'11px', color:'#7c3aed', fontWeight:700, marginBottom:'4px' }}>
+            Viendo: {viewingAsPlayer.email.split('@')[0].toUpperCase()}
+          </div>
+        )}
         <div style={{ display:'flex', justifyContent:'center', gap:'20px', color:'#94a3b8', fontSize:'12px' }}>
           <span>Contratista: <b style={{ color:'#e5e7eb' }}>{projectForm.contratistaNombre || '—'}</b></span>
           <span>Interventor: <b style={{ color:'#e5e7eb' }}>{projectForm.interventoriaNombre || '—'}</b></span>
