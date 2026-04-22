@@ -748,11 +748,18 @@ function resolverManifestacionComunidad() {
         }
 
         setLiveActs(prev =>
-          prev.map(act => ({
-            ...act,
-            baseWorkDay: Number(act.invertido) < Number(act.asignado) ? workDays : act.baseWorkDay,
-            baseInvertido: Number(act.invertido) < Number(act.asignado) ? act.invertido : act.baseInvertido,
-          }))
+          prev.map(act => {
+            const formAct = projectForm.actividades.find(a => a.id === act.id);
+            const nuevoAsignado = formAct
+              ? projectForm.pagosCols.reduce((sum, col) => sum + (Number(formAct.pagos?.[col.id]) || 0), 0)
+              : act.asignado;
+            return {
+              ...act,
+              asignado: nuevoAsignado,
+              baseWorkDay: Number(act.invertido) < nuevoAsignado ? workDays : act.baseWorkDay,
+              baseInvertido: Number(act.invertido) < nuevoAsignado ? act.invertido : act.baseInvertido,
+            };
+          })
         );
 
         setRecursosAgotados(false);
