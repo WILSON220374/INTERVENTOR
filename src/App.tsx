@@ -157,10 +157,10 @@ export default function App() {
   // Cargar pagos e incidencias de Supabase para el jugador
   useEffect(() => {
     if (!currentUser) return;
-    // Si es supervisor y no está viendo partida de un grupo, no cargar
-    if (isSupervisor && !viewingAsPlayer) return;
+    // Supervisor no necesita polling — ve los datos desde su panel
+    if (isSupervisor) return;
 
-    const targetUserId = isSupervisor && viewingAsPlayer ? viewingAsPlayer.id : currentUser.id;
+    const targetUserId = currentUser.id;
 
     async function loadFromSupabase() {
       // Cargar pagos
@@ -224,7 +224,7 @@ export default function App() {
     loadFromSupabase();
     const interval = setInterval(loadFromSupabase, 5000);
     return () => clearInterval(interval);
-  }, [currentUser, isSupervisor, viewingAsPlayer]);
+  }, [currentUser, isSupervisor]);
 
   function pushNotif(icon: string, text: string) {
     const id = ++nidRef.current;
@@ -1157,6 +1157,9 @@ function resolverManifestacionComunidad() {
         }}
         onViewGame={async (player) => {
           setViewingAsPlayer(player);
+          // Limpiar estado anterior
+          resetGameState(false);
+          setProjectForm(INITIAL_FORM);
           // Cargar el estado del juego de este grupo
           const { data: stateRow } = await supabase
             .from('game_state')

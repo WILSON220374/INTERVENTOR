@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import GameCanvas from './GameCanvas.tsx';
+import LoginScreen from './LoginScreen';
+import SupervisorDashboard from './SupervisorDashboard';
+import { supabase } from './supabaseClient';
 import './App.css';
 
 interface Notif { id: number; icon: string; text: string; }
@@ -22,6 +25,8 @@ interface ActivityRow {
   activa: boolean;
   avance: number;
   invertido: number;
+  baseWorkDay: number;
+  baseInvertido: number;
   pagos: Record<string, number>;
 }
 
@@ -59,6 +64,8 @@ const INITIAL_FORM: ProjectFormState = {
     activa: true,
     avance: 0,
     invertido: 0,
+    baseWorkDay: 0,
+    baseInvertido: 0,
     pagos: { anticipo: 0 },
   }],
 };
@@ -92,7 +99,11 @@ const BS: React.CSSProperties = {
 };
 
 export default function App() {
-  const [view, setView] = useState<'setup'|'game'>('setup');
+  const [view, setView] = useState<'login'|'setup'|'game'|'supervisor'>('login');
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentRole, setCurrentRole] = useState<string>('player');
+  const isSupervisor = currentUser?.email === 'supervisor@constructor.co';
+  const [viewingAsPlayer, setViewingAsPlayer] = useState<{id: string; email: string} | null>(null);
   const [projectForm, setProjectForm] = useState<ProjectFormState>(INITIAL_FORM);
   const [notifs, setNotifs] = useState<Notif[]>([]);
   const [gameHourDisplay, setGameHourDisplay] = useState('Día 1 - 07:00');
@@ -100,6 +111,7 @@ export default function App() {
   const [nightOpacity, setNightOpacity] = useState(0);
   const [elapsed, setElapsed] = useState('00:00:00');
   const [workDays, setWorkDays] = useState(0);
+  const [workTimeDisplay, setWorkTimeDisplay] = useState('Día 1 - 07:00');
   const [startTile, setStartTile] = useState<{r:number;c:number}|null>(null);
   const [roadProgress, setRoadProgress] = useState(0);
   const [projectProgress, setProjectProgress] = useState(0);
@@ -110,6 +122,7 @@ export default function App() {
   const [isDaytime, setIsDaytime] = useState(true);
   const [gameStarted, setGameStarted] = useState(false);
   const [timeScale, setTimeScale] = useState(1);
+  const [score, setScore] = useState(50);
   const [manifestacionComunidadActiva, setManifestacionComunidadActiva] = useState(false);
   const [manifestacionComunidadPendiente, setManifestacionComunidadPendiente] = useState(false);
   const [manifestacionComunidadResuelta, setManifestacionComunidadResuelta] = useState(false);
@@ -120,11 +133,98 @@ export default function App() {
   const [accidenteObraPendiente, setAccidenteObraPendiente] = useState(false);
   const [accidenteObraResuelta, setAccidenteObraResuelta] = useState(false);
   const [lluviaIntensaActiva, setLluviaIntensaActiva] = useState(false);
-
+  const [derrumbeActivo, setDerrumbeActivo] = useState(false);
+  const [derrumbePendiente, setDerrumbePendiente] = useState(false);
+  const [derrumbeResuelto, setDerrumbeResuelto] = useState(false);
   const startRef = useRef(Date.now());
+  const gameStartedAtRef = useRef(0);
   const nidRef = useRef(0);
   const suspendedTimeRef = useRef(0);
   const suspendStartRef = useRef(0);
+  const accumulatedGameMsRef = useRef(0);
+  const lastRealTickRef = useRef(Date.now());
+  const initialContratoValorRef = useRef<string | null>(null);
+  const initialContratoDuracionRef = useRef<string | null>(null);
+  const cambiosContratoValorRef = useRef(0);
+  const cambiosContratoDuracionRef = useRef(0);
+  const fondoAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ambienteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const enObraAudioRef = useRef<HTMLAudioElement | null>(null);
+  const nocheAudioRef = useRef<HTMLAudioElement | null>(null);
+  const lluviaAudioRef = useRef<HTMLAudioElement | null>(null);
+  const loadedRef = useRef(false);
+
+  // Cargar pagos e incidencias de Supabase para el jugador
+  useEffect(() => {
+    if (!currentUser) return;
+    // Si es supervisor y no está viendo partida de un grupo, no cargar
+    if (isSupervisor && !viewingAsPlayer) return;
+
+    const targetUserId = isSupervisor && viewingAsPlayer ? viewingAsPlayer.id : currentUser.id;
+
+    async function loadFromSupabase() {
+      // Cargar pagos
+      const { data: payments } = await supabase
+        .from('game_payments')
+        .select('*')
+        .eq('user_id', targetUserId)
+        .order('created_at');
+
+      if (payments && payments.length > 0) {
+        const cols = payments.map((p: any) => ({ id: p.id, label: p.payment_label }));
+        const globales: Record<string, number> = {};
+        for (const p of payments) {
+          globales[p.id] = p.amount;
+        }
+        setProjectForm(prev => ({
+          ...prev,
+          pagosCols: cols,
+          pagosGlobales: globales,
+          actividades: prev.actividades.map(a => ({
+            ...a,
+            pagos: {
+              ...Object.fromEntries(cols.map((c: any) => [c.id, a.pagos?.[c.id] || 0])),
+            },
+            asignado: cols.reduce((sum: number, c: any) => sum + (Number(a.pagos?.[c.id]) || 0), 0),
+          })),
+        }));
+      }
+
+      // Cargar incidencias
+      const { data: incidents } = await supabase
+        .from('game_incidents')
+        .select('*')
+        .eq('user_id', targetUserId);
+
+      if (incidents) {
+        for (const inc of incidents) {
+          if (inc.incident_type === 'manifestacion_comunidad') {
+            setManifestacionComunidadActiva(inc.is_active);
+            if (inc.is_active) setManifestacionComunidadPendiente(true);
+          }
+          if (inc.incident_type === 'demora_materiales') {
+            setDemoraMaterialesActiva(inc.is_active);
+            if (inc.is_active) setDemoraMaterialesPendiente(true);
+          }
+          if (inc.incident_type === 'accidente_obra') {
+            setAccidenteObraActiva(inc.is_active);
+            if (inc.is_active) setAccidenteObraPendiente(true);
+          }
+          if (inc.incident_type === 'lluvia_intensa') {
+            setLluviaIntensaActiva(inc.is_active);
+          }
+          if (inc.incident_type === 'derrumbe') {
+            setDerrumbeActivo(inc.is_active);
+            if (inc.is_active) setDerrumbePendiente(true);
+          }
+        }
+      }
+    }
+
+    loadFromSupabase();
+    const interval = setInterval(loadFromSupabase, 5000);
+    return () => clearInterval(interval);
+  }, [currentUser, isSupervisor, viewingAsPlayer]);
 
   function pushNotif(icon: string, text: string) {
     const id = ++nidRef.current;
@@ -153,31 +253,44 @@ export default function App() {
   }
 
   function syncLiveActsWithForm() {
-    setLiveActs(prev =>
-      projectForm.actividades.map(act => {
-        const asignado = totalAsignadoActividad(act);
-        const old = prev.find(p => p.id === act.id);
-        return {
-          ...act,
-          asignado,
-          avance: old?.avance ?? 0,
-          invertido: old?.invertido ?? 0,
-          activa: old?.activa ?? act.activa,
-        };
-      })
-    );
-  }
+  setLiveActs(prev =>
+    projectForm.actividades.map(act => {
+      const asignado = totalAsignadoActividad(act);
+      const old = prev.find(p => p.id === act.id);
+      return {
+        ...act,
+        asignado,
+        avance: old?.avance ?? 0,
+        invertido: old?.invertido ?? 0,
+        activa: old?.activa ?? act.activa,
+        baseWorkDay: old?.baseWorkDay ?? 0,
+        baseInvertido: old?.baseInvertido ?? 0,
+      };
+    })
+  );
+}
 
   function resetGameState(showNotif = false) {
     startRef.current = Date.now();
+    gameStartedAtRef.current = 0;
     suspendedTimeRef.current = 0;
     suspendStartRef.current = 0;
+    accumulatedGameMsRef.current = 0;
+    lastRealTickRef.current = Date.now();
+    startRef.current = Date.now();
+    initialContratoValorRef.current = null;
+    initialContratoDuracionRef.current = null;
+    cambiosContratoValorRef.current = 0;
+    cambiosContratoDuracionRef.current = 0;
+
     setElapsed('00:00:00');
     setGameHourDisplay('Día 1 - 07:00');
     setWorkDays(0);
+    setWorkTimeDisplay('Día 1 - 07:00');
     setStartTile(null);
     setRoadProgress(0);
     setProjectProgress(0);
+    setScore(50);
     setLiveActs(
       projectForm.actividades.map(a => ({
         ...a,
@@ -191,36 +304,149 @@ export default function App() {
     setRecursosAgotados(false);
     setGameStarted(false);
     setTimeScale(1);
+    setManifestacionComunidadPendiente(false);
+    setManifestacionComunidadResuelta(false);
+    setDemoraMaterialesPendiente(false);
+    setDemoraMaterialesResuelta(false);
+    setAccidenteObraPendiente(false);
+    setAccidenteObraResuelta(false);
+    setDerrumbePendiente(false);
+    setDerrumbeResuelto(false);
     if (showNotif) pushNotif('🔄', 'Proyecto reiniciado');
   }
 
-  function toggleSuspend() {
-    if (!gameStarted || obraFinished) return;
+  // ============ PERSISTENCIA EN SUPABASE ============
 
-    if (suspended) {
-      suspendedTimeRef.current += Date.now() - suspendStartRef.current;
-      setSuspended(false);
-      pushNotif('▶️', 'Trabajos reanudados');
+  async function saveGameState() {
+    if (!currentUser || isSupervisor) return;
+
+    // Calcular el tiempo de juego TOTAL incluyendo la sesión actual
+    const currentGameMs = accumulatedGameMsRef.current + (Date.now() - lastRealTickRef.current) * 12 * timeScale;
+    // Actualizar refs para que el juego siga correctamente
+    accumulatedGameMsRef.current = currentGameMs;
+    lastRealTickRef.current = Date.now();
+
+    const state = {
+      email: currentUser.email,
+      projectForm,
+      gameStarted,
+      startTile,
+      accumulatedGameMs: currentGameMs,
+      roadProgress,
+      projectProgress,
+      workDays,
+      score,
+      suspended,
+      obraFinished,
+      recursosAgotados,
+      timeScale,
+      liveActs,
+      suspendedTime: suspendedTimeRef.current,
+      cambiosContratoValor: cambiosContratoValorRef.current,
+      cambiosContratoDuracion: cambiosContratoDuracionRef.current,
+      gameStartedAt: gameStartedAtRef.current,
+      lastSavedAt: Date.now(),
+    };
+    await supabase
+      .from('game_state')
+      .update({ project_data: state, updated_at: new Date().toISOString() })
+      .eq('user_id', currentUser.id);
+  }
+
+  function loadGameState(data: any) {
+    if (!data) return;
+    loadedRef.current = true;
+    if (data.projectForm) setProjectForm(data.projectForm);
+    if (data.gameStarted !== undefined) setGameStarted(data.gameStarted);
+    if (data.startTile !== undefined) setStartTile(data.startTile);
+    if (data.roadProgress !== undefined) setRoadProgress(data.roadProgress);
+    if (data.projectProgress !== undefined) setProjectProgress(data.projectProgress);
+    if (data.workDays !== undefined) setWorkDays(data.workDays);
+    if (data.score !== undefined) setScore(data.score);
+    if (data.suspended !== undefined) setSuspended(data.suspended);
+    if (data.obraFinished !== undefined) setObraFinished(data.obraFinished);
+    if (data.recursosAgotados !== undefined) setRecursosAgotados(data.recursosAgotados);
+    if (data.timeScale !== undefined) setTimeScale(data.timeScale);
+    if (data.liveActs) setLiveActs(data.liveActs);
+    if (data.suspendedTime !== undefined) suspendedTimeRef.current = data.suspendedTime;
+    if (data.cambiosContratoValor !== undefined) cambiosContratoValorRef.current = data.cambiosContratoValor;
+    if (data.cambiosContratoDuracion !== undefined) cambiosContratoDuracionRef.current = data.cambiosContratoDuracion;
+    if (data.gameStartedAt) gameStartedAtRef.current = data.gameStartedAt;
+
+    // Calcular tiempo offline y avanzar el juego
+    const savedMs = data.accumulatedGameMs || 0;
+    if (data.lastSavedAt && data.gameStarted && !data.obraFinished) {
+      const offlineRealMs = Date.now() - data.lastSavedAt;
+      if (data.suspended || data.recursosAgotados) {
+        // Juego estaba detenido: el tiempo offline se suma como tiempo suspendido
+        suspendedTimeRef.current = (data.suspendedTime || 0) + offlineRealMs;
+        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 12);
+      } else {
+        // Juego estaba corriendo: avanzar normalmente (velocidad x1)
+        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 12);
+      }
     } else {
-      suspendStartRef.current = Date.now();
-      setSuspended(true);
-      pushNotif('⏸️', 'Trabajos suspendidos');
+      accumulatedGameMsRef.current = savedMs;
     }
+
+    lastRealTickRef.current = Date.now();
+    startRef.current = Date.now();
   }
 
-  function resolverManifestacionComunidad() {
-    if (!manifestacionComunidadPendiente) return;
+  // Auto-guardar cada 10 segundos
+  useEffect(() => {
+    if (!currentUser || isSupervisor || !gameStarted) return;
+    const interval = setInterval(saveGameState, 10000);
+    return () => clearInterval(interval);
+  }, [currentUser, isSupervisor, gameStarted, projectForm, roadProgress, score, workDays, liveActs, obraFinished, suspended]);
 
-    if (suspended) {
-      suspendedTimeRef.current += Date.now() - suspendStartRef.current;
-    }
+  // ============ FIN PERSISTENCIA ============
 
-    setManifestacionComunidadPendiente(false);
-    setManifestacionComunidadResuelta(true);
+  function toggleSuspend() {
+  if (!gameStarted || obraFinished) return;
+
+  if (suspended) {
+    suspendedTimeRef.current += Date.now() - suspendStartRef.current;
     setSuspended(false);
-    pushNotif('🤝', 'Manifestación de la comunidad solucionada.');
+    pushNotif('▶️', 'Trabajos reanudados');
+  } else {
+    suspendStartRef.current = Date.now();
+    setSuspended(true);
+    pushNotif('⏸️', 'Trabajos suspendidos');
+  }
+}
+
+function changeTimeScale(newScale: number) {
+  const now = Date.now();
+  const realDelta = now - lastRealTickRef.current;
+
+  accumulatedGameMsRef.current += realDelta * 12 * timeScale;
+  lastRealTickRef.current = now;
+
+  setTimeScale(newScale);
+}
+
+function resolverManifestacionComunidad() {
+  if (!manifestacionComunidadPendiente) return;
+
+  if (suspended) {
+    suspendedTimeRef.current += Date.now() - suspendStartRef.current;
   }
 
+  setManifestacionComunidadPendiente(false);
+  setManifestacionComunidadResuelta(true);
+  setManifestacionComunidadActiva(false);
+  setSuspended(false);
+  pushNotif('🤝', 'Manifestación de la comunidad solucionada.');
+
+  if (currentUser) {
+    supabase.from('game_incidents')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('user_id', currentUser.id)
+      .eq('incident_type', 'manifestacion_comunidad')
+      .then();
+  }
+}
   function resolverDemoraMateriales() {
     if (!demoraMaterialesPendiente) return;
 
@@ -230,8 +456,17 @@ export default function App() {
 
     setDemoraMaterialesPendiente(false);
     setDemoraMaterialesResuelta(true);
+    setDemoraMaterialesActiva(false);
     setSuspended(false);
     pushNotif('📦', 'Demora en los materiales solucionada.');
+
+    if (currentUser) {
+      supabase.from('game_incidents')
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq('user_id', currentUser.id)
+        .eq('incident_type', 'demora_materiales')
+        .then();
+    }
   }
 
   function resolverAccidenteObra() {
@@ -243,13 +478,153 @@ export default function App() {
 
     setAccidenteObraPendiente(false);
     setAccidenteObraResuelta(true);
+    setAccidenteObraActiva(false);
     setSuspended(false);
     pushNotif('🚑', 'Accidente en la obra solucionado.');
+
+    if (currentUser) {
+      supabase.from('game_incidents')
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq('user_id', currentUser.id)
+        .eq('incident_type', 'accidente_obra')
+        .then();
+    }
+  }
+
+  function resolverDerrumbe() {
+    return;
   }
 
   useEffect(() => {
+    if (gameStarted) {
+      // Solo actualizar asignado, NUNCA tocar avance/invertido
+      setLiveActs(prev =>
+        prev.map(act => {
+          const formAct = projectForm.actividades.find(a => a.id === act.id);
+          if (!formAct) return act;
+          const asignado = projectForm.pagosCols.reduce((sum, col) => sum + (Number(formAct.pagos?.[col.id]) || 0), 0);
+          return { ...act, asignado };
+        })
+      );
+      return;
+    }
     syncLiveActsWithForm();
   }, [projectForm.actividades, projectForm.pagosCols, projectForm.pagosGlobales]);
+  
+  useEffect(() => {
+    fondoAudioRef.current = new Audio('/sonidos/fondo.mp3');
+    fondoAudioRef.current.loop = true;
+    fondoAudioRef.current.volume = 0.3;
+
+    ambienteAudioRef.current = new Audio('/sonidos/ambiente_.mp3');
+    ambienteAudioRef.current.loop = true;
+    ambienteAudioRef.current.volume = 0.35;
+
+    enObraAudioRef.current = new Audio('/sonidos/en obra.mp3');
+    enObraAudioRef.current.loop = true;
+    enObraAudioRef.current.volume = 0.35;
+
+    nocheAudioRef.current = new Audio('/sonidos/noche.mp3');
+    nocheAudioRef.current.loop = true;
+    nocheAudioRef.current.volume = 0.35;
+
+    lluviaAudioRef.current = new Audio('/sonidos/lluvia.mp3');
+    lluviaAudioRef.current.loop = true;
+    lluviaAudioRef.current.volume = 0.35;
+
+    return () => {
+      fondoAudioRef.current?.pause();
+      fondoAudioRef.current = null;
+      ambienteAudioRef.current?.pause();
+      ambienteAudioRef.current = null;
+      enObraAudioRef.current?.pause();
+      enObraAudioRef.current = null;
+      nocheAudioRef.current?.pause();
+      nocheAudioRef.current = null;
+      lluviaAudioRef.current?.pause();
+      lluviaAudioRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!fondoAudioRef.current) return;
+
+    if (view === 'setup') {
+      fondoAudioRef.current.currentTime = 0;
+      fondoAudioRef.current.play().catch(() => {});
+    } else {
+      fondoAudioRef.current.pause();
+      fondoAudioRef.current.currentTime = 0;
+    }
+  }, [view]);
+
+  useEffect(() => {
+    if (!ambienteAudioRef.current) return;
+
+    if (
+      view === 'game' &&
+      isDaytime &&
+      !obraFinished &&
+      !lluviaIntensaActiva &&
+      (!startTile || suspended || derrumbePendiente)
+    ) {
+      ambienteAudioRef.current.play().catch(() => {});
+    } else {
+      ambienteAudioRef.current.pause();
+      ambienteAudioRef.current.currentTime = 0;
+    }
+  }, [view, isDaytime, obraFinished, lluviaIntensaActiva, startTile, suspended, derrumbePendiente]);
+
+  useEffect(() => {
+    if (!enObraAudioRef.current) return;
+
+    if (
+      view === 'game' &&
+      isDaytime &&
+      !!startTile &&
+      !suspended &&
+      !obraFinished &&
+      !recursosAgotados &&
+      !lluviaIntensaActiva
+    ) {
+      enObraAudioRef.current.play().catch(() => {});
+    } else {
+      enObraAudioRef.current.pause();
+      enObraAudioRef.current.currentTime = 0;
+    }
+  }, [view, isDaytime, startTile, suspended, obraFinished, recursosAgotados, lluviaIntensaActiva]);
+  
+  useEffect(() => {
+    if (!nocheAudioRef.current) return;
+
+    if (
+      view === 'game' &&
+      !isDaytime &&
+      !obraFinished &&
+      !lluviaIntensaActiva
+    ) {
+      nocheAudioRef.current.play().catch(() => {});
+    } else {
+      nocheAudioRef.current.pause();
+      nocheAudioRef.current.currentTime = 0;
+    }
+  }, [view, isDaytime, obraFinished, lluviaIntensaActiva]);
+  
+  useEffect(() => {
+    if (!lluviaAudioRef.current) return;
+
+    if (
+      view === 'game' &&
+      lluviaIntensaActiva &&
+      suspended &&
+      !obraFinished
+    ) {
+      lluviaAudioRef.current.play().catch(() => {});
+    } else {
+      lluviaAudioRef.current.pause();
+      lluviaAudioRef.current.currentTime = 0;
+    }
+  }, [view, lluviaIntensaActiva, suspended, obraFinished]);
   
   useEffect(() => {
     if (view !== 'game') return;
@@ -273,8 +648,6 @@ export default function App() {
 
   useEffect(() => {
     if (view !== 'game') return;
-  useEffect(() => {
-    if (view !== 'game') return;
     if (!accidenteObraPendiente || accidenteObraResuelta) return;
     if (suspended) return;
 
@@ -285,6 +658,15 @@ export default function App() {
 
   useEffect(() => {
     if (view !== 'game') return;
+    if (!derrumbePendiente) return;
+    if (suspended) return;
+
+    suspendStartRef.current = Date.now();
+    setSuspended(true);
+    pushNotif('⛰️', 'Hay un derrumbre que impide la ejecucion de los tabajos hable con el supervisor');
+  }, [view, derrumbePendiente, suspended]);
+  useEffect(() => {
+    if (view !== 'game') return;
     if (!lluviaIntensaActiva) return;
     if (suspended) return;
 
@@ -293,6 +675,21 @@ export default function App() {
     pushNotif('🌧️', 'La intensidad del invierno impide continuar con los trabajos.');
   }, [view, lluviaIntensaActiva, suspended]);
 
+  useEffect(() => {
+    if (view !== 'game') return;
+    if (!suspended) return;
+    if (lluviaIntensaActiva) return;
+    if (manifestacionComunidadPendiente || demoraMaterialesPendiente || accidenteObraPendiente || derrumbePendiente) return;
+
+    if (suspendStartRef.current) {
+      suspendedTimeRef.current += Date.now() - suspendStartRef.current;
+      suspendStartRef.current = 0;
+    }
+
+    setSuspended(false);
+    pushNotif('▶️', 'Obra reanudada.');
+  }, [view, suspended, lluviaIntensaActiva, manifestacionComunidadPendiente, demoraMaterialesPendiente, accidenteObraPendiente, derrumbePendiente]);
+  
   useEffect(() => {
     if (!manifestacionComunidadResuelta) return;
 
@@ -324,9 +721,19 @@ export default function App() {
   }, [accidenteObraResuelta]);
 
   useEffect(() => {
-    syncLiveActsWithForm();
-  }, [projectForm.actividades, projectForm.pagosCols, projectForm.pagosGlobales]);
+    if (!derrumbeResuelto) return;
 
+    const timeout = setTimeout(() => {
+      setDerrumbeResuelto(false);
+    }, 30000);
+
+    return () => clearTimeout(timeout);
+  }, [derrumbeResuelto]);
+
+  useEffect(() => {
+    if (gameStarted || obraFinished) return;
+    syncLiveActsWithForm();
+  }, [projectForm.actividades, projectForm.pagosCols, projectForm.pagosGlobales, gameStarted, obraFinished]);
   useEffect(() => {
     if (gameStarted && recursosAgotados) {
       const nuevoTotalPagos = totalPagosGlobales();
@@ -335,24 +742,39 @@ export default function App() {
       const totalInvertidoActual = liveActs.reduce((sum, act) => sum + act.invertido, 0);
 
       if (maxDisponible > totalInvertidoActual) {
+        if (suspendStartRef.current) {
+          suspendedTimeRef.current += Date.now() - suspendStartRef.current;
+          suspendStartRef.current = 0;
+        }
+
+        setLiveActs(prev =>
+          prev.map(act => ({
+            ...act,
+            baseWorkDay: Number(act.invertido) < Number(act.asignado) ? workDays : act.baseWorkDay,
+            baseInvertido: Number(act.invertido) < Number(act.asignado) ? act.invertido : act.baseInvertido,
+          }))
+        );
+
         setRecursosAgotados(false);
         pushNotif('💵', 'Ingresaron nuevos recursos. La obra continúa.');
       }
     }
   }, [projectForm.pagosGlobales, projectForm.actividades]);
+  
   useEffect(() => {
     if (view !== 'game') return;
 
     const iv = setInterval(() => {
-      if (obraFinished) return;
+      if (!gameStarted || !startTile || obraFinished) return;
 
-      const realEl = Date.now() - startRef.current;
+      const realEl = gameStartedAtRef.current > 0 ? Date.now() - gameStartedAtRef.current : 0;
       const eh = Math.floor(realEl / 3600000);
       const em = Math.floor((realEl % 3600000) / 60000);
       const es = Math.floor((realEl % 60000) / 1000);
       setElapsed(`${String(eh).padStart(2,'0')}:${String(em).padStart(2,'0')}:${String(es).padStart(2,'0')}`);
 
-      const gameMs = realEl * 8 * timeScale
+      const realDelta = Date.now() - lastRealTickRef.current;
+      const gameMs = accumulatedGameMsRef.current + realDelta * 12 * timeScale;
       const gameTotalHours = gameMs / 3600000 + 7;
       const gDay = Math.floor(gameTotalHours / 24) + 1;
       const gHour = Math.floor(gameTotalHours % 24);
@@ -369,24 +791,33 @@ export default function App() {
       else if (gHour >= 6 && gHour < 7) op = (1 - (gHour - 6 + gMin / 60)) * 0.55;
       setNightOpacity(op);
 
-      if (!gameStarted || !startTile) return;
+      const obraDetenida = suspended || recursosAgotados || obraFinished;
 
-      const suspTime = suspended
+      const suspTime = obraDetenida
         ? (Date.now() - suspendStartRef.current + suspendedTimeRef.current)
         : suspendedTimeRef.current;
 
-      const totalGameDays = (gameMs / 3600000) / 24;
-      const fullDays = Math.floor(totalGameDays);
-      const partialH = gameTotalHours % 24;
+      const totalGameDays = gameMs / 3600000 / 24;
+      const suspGameDays = (suspTime * 12 * timeScale) / 3600000 / 24;
+      const effWorkDays = Math.max(0, totalGameDays - suspGameDays);
 
-      let workH = fullDays * 11;
-      if (partialH >= 7 && partialH < 18) workH += (partialH - 7);
-      else if (partialH >= 18) workH += 11;
-
-      const suspGameH = (suspTime * 8 * timeScale) / 3600000;
-      const effWorkH = Math.max(0, workH - suspGameH);
-      const effWorkDays = effWorkH / 11;
+      const workTotalHours = effWorkDays * 24 + 7;
+      const workDay = Math.floor(workTotalHours / 24) + 1;
+      const workHour = Math.floor(workTotalHours % 24);
+      const workMin = Math.floor(((workTotalHours % 1) * 60) % 60);
       setWorkDays(effWorkDays);
+      setWorkTimeDisplay(`Día ${workDay} - ${String(workHour).padStart(2,'0')}:${String(workMin).padStart(2,'0')}`);
+
+      const diferenciaTiempoPct = gameTotalHours > 0
+        ? (Math.abs(gameTotalHours - workTotalHours) / gameTotalHours) * 100
+        : 0;
+
+      const descuentoTiempo = Math.max(0, Math.floor(diferenciaTiempoPct) - 60);
+      const descuentoCambiosValor = Math.max(0, cambiosContratoValorRef.current - 1) * 5;
+      const descuentoCambiosDuracion = Math.max(0, cambiosContratoDuracionRef.current - 1) * 5;
+      const nuevoPuntaje = Math.max(35, 50 - descuentoTiempo - descuentoCambiosValor - descuentoCambiosDuracion);
+
+      setScore(nuevoPuntaje);
 
       const totalPagos = totalPagosGlobales();
       const totalAsignado = totalAsignadoGeneral();
@@ -402,6 +833,7 @@ export default function App() {
           const asignado = Number(act.asignado) || 0;
 
           if (!act.nombre || dur <= 0 || valorAct <= 0 || asignado <= 0 || !act.activa) {
+            totalSpent += Number(act.invertido) || 0;
             return {
               ...act,
               avance: act.avance,
@@ -410,17 +842,20 @@ export default function App() {
           }
 
           const valorDiaActividad = valorAct / dur;
-          const maxDiasPorAsignado = Math.min(dur, asignado / valorDiaActividad);
-          const diasTrabajadosActividad = Math.min(effWorkDays, maxDiasPorAsignado);
+          const diasNuevos = Math.max(0, effWorkDays - (act.baseWorkDay || 0));
+          const invertidoBase = Number(act.baseInvertido) || 0;
 
-          let newInvertido = Math.min(asignado, valorDiaActividad * diasTrabajadosActividad);
+          let newInvertido = Math.min(
+            asignado,
+            invertidoBase + (valorDiaActividad * diasNuevos)
+          );
           let newAvance = Math.min(100, (newInvertido / valorAct) * 100);
 
           totalSpent += newInvertido;
 
           return {
             ...act,
-            avance: Math.round(newAvance),
+            avance: Number(newAvance.toFixed(1)),
             invertido: Math.round(newInvertido),
           };
         });
@@ -442,7 +877,7 @@ export default function App() {
             updated[i] = {
               ...actual,
               invertido: Math.round(invertidoAjustado),
-              avance: Math.round(avanceAjustado),
+              avance: Number(avanceAjustado.toFixed(1)),
             };
 
             faltante -= descuento;
@@ -452,20 +887,38 @@ export default function App() {
         }
 
         const avanceGeneral = contratoTotal > 0 ? Math.min(100, (totalSpent / contratoTotal) * 100) : 0;
-        setProjectProgress(avanceGeneral);
-        setRoadProgress(avanceGeneral);
 
-        if (topeGlobalDisponible > 0 && totalSpent >= topeGlobalDisponible && !recursosAgotados) {
-          setRecursosAgotados(true);
-          pushNotif('💰', 'Recursos agotados. La obra se detiene.');
+        const actividadesDelProyecto = updated.filter(a => a.nombre && Number(a.valor) > 0);
+        const obraTerminadaAhora =
+          actividadesDelProyecto.length > 0 &&
+          actividadesDelProyecto.every(a => a.avance >= 100);
+
+        if (obraTerminadaAhora) {
+          setProjectProgress(100);
+          setRoadProgress(100);
+          setRecursosAgotados(false);
+
+          if (!obraFinished) {
+            accumulatedGameMsRef.current = gameMs;
+            lastRealTickRef.current = Date.now();
+            if (suspendStartRef.current) {
+              suspendedTimeRef.current += Date.now() - suspendStartRef.current;
+              suspendStartRef.current = 0;
+            }
+            setSuspended(true);
+            setObraFinished(true);
+            pushNotif('🎉', '¡Obra terminada!');
+          }
+        } else {
+          setProjectProgress(avanceGeneral);
+          setRoadProgress(avanceGeneral);
+
+          if (topeGlobalDisponible > 0 && totalSpent >= topeGlobalDisponible && !recursosAgotados) {
+            suspendStartRef.current = Date.now();
+            setRecursosAgotados(true);
+            pushNotif('💰', 'Recursos agotados. La obra se detiene.');
+          }
         }
-
-        const activasConRecursos = updated.filter(a => a.nombre && a.activa && Number(a.asignado) > 0);
-        if (activasConRecursos.length > 0 && activasConRecursos.every(a => a.avance >= 100) && !obraFinished) {
-          setObraFinished(true);
-          pushNotif('🎉', '¡Obra terminada!');
-        }
-
         return updated;
       });
     }, 500);
@@ -512,7 +965,7 @@ export default function App() {
     setLiveActs(p => p.map(a => a.id === id ? { ...a, activa: !a.activa } : a));
   }
 
-  function updateField(f: string, v: string) {
+   function updateField(f: string, v: string) {
     setProjectForm(p => ({ ...p, [f]: v }));
   }
 
@@ -531,13 +984,27 @@ export default function App() {
   }
 
   function updatePagoGlobal(pagoId: string, v: string) {
-    setProjectForm(p => ({
-      ...p,
-      pagosGlobales: {
-        ...p.pagosGlobales,
-        [pagoId]: Number(v) || 0,
-      }
-    }));
+    const nuevoValor = Number(v) || 0;
+
+    setProjectForm(p => {
+      const contratoValor = Number(p.contratoValor) || 0;
+
+      const totalOtrosPagos = p.pagosCols.reduce((sum, col) => {
+        if (col.id === pagoId) return sum;
+        return sum + (Number(p.pagosGlobales[col.id]) || 0);
+      }, 0);
+
+      const maxDisponible = Math.max(0, contratoValor - totalOtrosPagos);
+      const valorFinal = Math.min(nuevoValor, maxDisponible);
+
+      return {
+        ...p,
+        pagosGlobales: {
+          ...p.pagosGlobales,
+          [pagoId]: valorFinal,
+        }
+      };
+    });
   }
 
   function updatePagoActividad(id: number, pagoId: string, v: string) {
@@ -595,7 +1062,7 @@ export default function App() {
     }));
   }
 
-  function addPago() {
+   function addPago() {
     setProjectForm(p => {
       const pagosExistentes = p.pagosCols.filter(col => col.id !== 'anticipo').length;
       const nuevoId = `pago_${Date.now()}`;
@@ -613,6 +1080,24 @@ export default function App() {
     });
   }
 
+  function removePago(pagoId: string) {
+    if (pagoId === 'anticipo') return;
+
+    setProjectForm(p => ({
+      ...p,
+      pagosCols: p.pagosCols.filter(col => col.id !== pagoId),
+      pagosGlobales: Object.fromEntries(
+        Object.entries(p.pagosGlobales).filter(([key]) => key !== pagoId)
+      ),
+      actividades: p.actividades.map(a => ({
+        ...a,
+        pagos: Object.fromEntries(
+          Object.entries(a.pagos || {}).filter(([key]) => key !== pagoId)
+        ),
+      })),
+    }));
+  }
+
   function removeAct(id: number) {
     setProjectForm(p => ({
       ...p,
@@ -625,35 +1110,144 @@ export default function App() {
   const actividadesOk = contratoVal > 0 && totalActVal === contratoVal;
   const totalPagos = totalPagosGlobales();
   const asigTotal = totalAsignadoGeneral();
-  const canStart = actividadesOk && !!projectForm.proyectoNombre && !!projectForm.contratistaNombre && totalPagos > 0;
+  const hayActividadesConRecursos = projectForm.actividades.some(a => Number(a.asignado) > 0);
+  const canStart = actividadesOk && !!projectForm.proyectoNombre && !!projectForm.contratistaNombre && totalPagos > 0 && hayActividadesConRecursos;
+
+  if (view === 'login') {
+    return (
+      <LoginScreen onLogin={async (user, role) => {
+        setCurrentUser(user);
+        setCurrentRole(role);
+        if (user.email === 'supervisor@constructor.co') {
+          setView('supervisor');
+        } else {
+          // Cargar estado guardado
+          const { data: stateRow } = await supabase
+            .from('game_state')
+            .select('project_data, is_reset')
+            .eq('user_id', user.id)
+            .maybeSingle();
+
+          if (stateRow?.is_reset) {
+            // El supervisor reinició este grupo — empezar de cero
+            resetGameState(false);
+            setProjectForm(INITIAL_FORM);
+            await supabase
+              .from('game_state')
+              .update({ is_reset: false, updated_at: new Date().toISOString() })
+              .eq('user_id', user.id);
+          } else if (stateRow?.project_data && stateRow.project_data.gameStarted !== undefined) {
+            loadGameState(stateRow.project_data);
+          }
+          setView('setup');
+        }
+      }} />
+    );
+  }
+
+  if (view === 'supervisor') {
+    return (
+      <SupervisorDashboard
+        currentUser={currentUser}
+        onLogout={async () => {
+          await supabase.auth.signOut();
+          setCurrentUser(null);
+          setCurrentRole('player');
+          setView('login');
+        }}
+        onViewGame={async (player) => {
+          setViewingAsPlayer(player);
+          // Limpiar estado anterior
+          resetGameState(false);
+          setProjectForm(INITIAL_FORM);
+          // Cargar el estado del juego de este grupo
+          const { data: stateRow } = await supabase
+            .from('game_state')
+            .select('project_data')
+            .eq('user_id', player.id)
+            .maybeSingle();
+          if (stateRow?.project_data && stateRow.project_data.gameStarted !== undefined) {
+            loadGameState(stateRow.project_data);
+            setView('game');
+          } else if (stateRow?.project_data?.projectForm) {
+            loadGameState(stateRow.project_data);
+            setView('setup');
+          } else {
+            setView('setup');
+          }
+        }}
+      />
+    );
+  }
 
   if (view === 'setup') {
     return (
-      <div style={{ minHeight:'100vh', maxHeight:'100vh', overflowY:'auto', background:'#0f172a', color:'#e5e7eb', padding:'32px', fontFamily:'Inter,system-ui,sans-serif', boxSizing:'border-box' }}>
+      <div
+        onMouseDown={() => {
+          if (view === 'setup' && fondoAudioRef.current) {
+            fondoAudioRef.current.play().catch(() => {});
+          }
+        }}
+        style={{ minHeight:'100vh', maxHeight:'100vh', overflowY:'auto', background:'#0f172a', color:'#e5e7eb', padding:'32px', fontFamily:'Inter,system-ui,sans-serif', boxSizing:'border-box' }}
+      >
         <div style={{ maxWidth:'1250px', margin:'0 auto', background:'#111827', border:'1px solid #334155', borderRadius:'18px', padding:'28px', boxShadow:'0 10px 30px rgba(0,0,0,0.25)' }}>
           <div style={{ display:'flex', justifyContent:'space-between', gap:'20px', alignItems:'center', marginBottom:'24px', flexWrap:'wrap' }}>
             <div>
               <h1 style={{ margin:0, fontSize:'28px' }}>Configuración inicial del proyecto</h1>
               <p style={{ margin:'8px 0 0 0', color:'#94a3b8' }}>Registra la información base antes de entrar al juego.</p>
+              {isSupervisor && viewingAsPlayer && (
+                <p style={{ margin:'4px 0 0 0', color:'#facc15', fontSize:'13px', fontWeight:700 }}>
+                  Viendo partida de: {viewingAsPlayer.email.split('@')[0].toUpperCase()}
+                </p>
+              )}
             </div>
 
-            <div style={{ display:'flex', gap:'8px', flexWrap:'wrap', justifyContent:'flex-end' }}>
+            <div style={{ display:'flex', gap:'8px', flexWrap:'wrap', justifyContent:'flex-end', alignItems:'flex-end', flexDirection:'column' }}>
+              {isSupervisor && viewingAsPlayer && (
+                <button
+                  onClick={() => { setViewingAsPlayer(null); setView('supervisor'); }}
+                  style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#7c3aed', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
+                >
+                  ← Volver al panel
+                </button>
+              )}
               <button
                 onClick={() => {
                   if (canStart && !gameStarted) {
+                    setSuspended(false);
+                    setObraFinished(false);
+                    setRecursosAgotados(false);
+                    setStartTile(null);
+                    setRoadProgress(0);
+                    setProjectProgress(0);
+                    suspendedTimeRef.current = 0;
+                    suspendStartRef.current = 0;
+                    accumulatedGameMsRef.current = 0;
+                    lastRealTickRef.current = Date.now();
+                    startRef.current = Date.now();
+                    gameStartedAtRef.current = Date.now();
+                    setElapsed('00:00:00');
+                    setGameHourDisplay('Día 1 - 07:00');
+                    setWorkDays(0);
+                    setWorkTimeDisplay('Día 1 - 07:00');
+
                     setLiveActs(projectForm.actividades.map(a => ({
                       ...a,
                       asignado: totalAsignadoActividad(a),
                       avance: 0,
                       invertido: 0,
                     })));
-                    setStartTile(null);
+
                     setManifestacionComunidadPendiente(manifestacionComunidadActiva);
                     setManifestacionComunidadResuelta(false);
                     setDemoraMaterialesPendiente(demoraMaterialesActiva);
                     setDemoraMaterialesResuelta(false);
                     setAccidenteObraPendiente(accidenteObraActiva);
                     setAccidenteObraResuelta(false);
+                    setDerrumbePendiente(derrumbeActivo);
+                    setDerrumbeResuelto(false);
+                    initialContratoValorRef.current = projectForm.contratoValor;
+                    initialContratoDuracionRef.current = projectForm.contratoDuracion;
                     setView('game');
                   }
                 }}
@@ -663,14 +1257,41 @@ export default function App() {
                 Iniciar proyecto
               </button>
 
+              {!gameStarted && !hayActividadesConRecursos && (
+                <div style={{ fontSize:'11px', color:'#fca5a5', maxWidth:'280px', textAlign:'right' }}>
+                  Debes asignar recursos a por lo menos una actividad antes de iniciar la obra.
+                </div>
+              )}
+
               <button
-                onClick={() => setView('game')}
+                onClick={() => {
+                  if (!gameStarted) return;
+
+                  if (
+                    initialContratoValorRef.current !== null &&
+                    projectForm.contratoValor !== initialContratoValorRef.current
+                  ) {
+                    cambiosContratoValorRef.current += 1;
+                    initialContratoValorRef.current = projectForm.contratoValor;
+                  }
+
+                  if (
+                    initialContratoDuracionRef.current !== null &&
+                    projectForm.contratoDuracion !== initialContratoDuracionRef.current
+                  ) {
+                    cambiosContratoDuracionRef.current += 1;
+                    initialContratoDuracionRef.current = projectForm.contratoDuracion;
+                  }
+
+                  setView('game');
+                }}
                 disabled={!gameStarted}
                 style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:gameStarted?'#0f766e':'#334155', color:'#fff', fontWeight:700, cursor:gameStarted?'pointer':'not-allowed', fontSize:'15px', opacity:gameStarted?1:0.5 }}
               >
                 Regresar a la obra
               </button>
 
+              {isSupervisor && (
               <button
                 onClick={toggleSuspend}
                 disabled={!gameStarted || obraFinished}
@@ -678,12 +1299,22 @@ export default function App() {
               >
                 {suspended ? 'Reanudar' : 'Suspender'}
               </button>
+              )}
 
+              {isSupervisor && (
               <button
                 onClick={() => resetGameState(true)}
                 style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#475569', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
               >
                 Reiniciar
+              </button>
+              )}
+
+              <button
+                onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setView('login'); }}
+                style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
+              >
+                Guardar y salir
               </button>
             </div>
           </div>
@@ -758,6 +1389,7 @@ export default function App() {
             {actividadesOk && <div style={{ marginTop:'8px', padding:'8px 12px', borderRadius:'8px', background:'#0a2e1a', fontSize:'12px', color:'#4ade80' }}>✓ Actividades = valor del contrato</div>}
           </div>
 
+          {isSupervisor && (<>
           <div style={{ ...SS, marginTop:'20px' }}>
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'14px', flexWrap:'wrap', gap:'12px' }}>
               <h2 style={{ marginTop:0, marginBottom:0 }}>CREAR PAGOS</h2>
@@ -769,7 +1401,20 @@ export default function App() {
                   <tr style={{ color:'#e5e7eb', fontWeight:700, fontSize:'13px' }}>
                     <th style={{ textAlign:'left', padding:'8px 10px', borderBottom:'1px solid #334155' }}></th>
                     {projectForm.pagosCols.map(col => (
-                      <th key={col.id} style={{ textAlign:'center', padding:'8px 10px', borderBottom:'1px solid #334155' }}>{col.label}</th>
+                      <th key={col.id} style={{ textAlign:'center', padding:'8px 10px', borderBottom:'1px solid #334155' }}>
+                        <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:'8px' }}>
+                          <span>{col.label}</span>
+                          {col.id !== 'anticipo' && (
+                            <button
+                              onClick={() => removePago(col.id)}
+                              style={{ border:'none', background:'transparent', color:'#fca5a5', cursor:'pointer', fontWeight:700, fontSize:'12px', padding:0 }}
+                              title="Eliminar pago"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      </th>
                     ))}
                     <th style={{ textAlign:'center', padding:'8px 10px', borderBottom:'1px solid #334155' }}>TOTAL PAGOS</th>
                   </tr>
@@ -798,8 +1443,14 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+          </div>
+          </>)}
 
-            <div style={{ overflowX:'auto' }}>
+          <div style={{ ...SS, marginTop:'20px' }}>
+            <h2 style={{ marginTop:0, marginBottom:0 }}>DISTRIBUCIÓN DE RECURSOS</h2>
+            <p style={{ fontSize:'12px', color:'#94a3b8', marginBottom:'14px' }}>
+              {isSupervisor ? 'Asigna recursos a cada actividad' : projectForm.pagosCols.length <= 1 && !projectForm.pagosGlobales[projectForm.pagosCols[0]?.id] ? 'Esperando pagos del supervisor...' : 'Distribuye los recursos recibidos entre las actividades'}
+            </p>
               <table style={{ width:'100%', borderCollapse:'collapse', minWidth:'760px' }}>
                 <thead>
                   <tr style={{ color:'#e5e7eb', fontWeight:700, fontSize:'13px' }}>
@@ -847,7 +1498,6 @@ export default function App() {
                   ))}
                 </tbody>
               </table>
-            </div>
 
             <div style={{ marginTop:'14px', paddingTop:'12px', borderTop:'1px solid #334155', display:'flex', justifyContent:'space-between', fontWeight:700 }}>
               <span>Total recursos asignados</span>
@@ -857,6 +1507,7 @@ export default function App() {
             </div>
           </div>
 
+          {isSupervisor && (<>
           <div style={{ ...SS, marginTop:'20px' }}>
             <h2 style={{ marginTop:0, marginBottom:'14px' }}>Incidencias de obra</h2>
 
@@ -925,6 +1576,28 @@ export default function App() {
               </label>
             </div>
           </div>
+
+          <div style={{ ...SS, marginTop:'20px' }}>
+            <h2 style={{ marginTop:0, marginBottom:'14px' }}>Adición</h2>
+
+            <div style={{ display:'grid', gridTemplateColumns:'1fr', gap:'10px' }}>
+              <label style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'12px', padding:'10px 12px', border:'1px solid #334155', borderRadius:'10px', background:'#111827' }}>
+                <span style={{ color:'#e5e7eb', fontSize:'14px' }}>Derrumbe</span>
+                <input
+                  type="checkbox"
+                  checked={derrumbeActivo}
+                  onChange={e => {
+                    const activo = e.target.checked;
+                    setDerrumbeActivo(activo);
+                    setDerrumbePendiente(activo);
+                    setDerrumbeResuelto(false);
+                  }}
+                  style={{ width:'18px', height:'18px', cursor:'pointer' }}
+                />
+              </label>
+            </div>
+          </div>
+          </>)}
         </div>
       </div>
     );
@@ -942,6 +1615,8 @@ export default function App() {
         roadProgress={roadProgress}
         onGrayTileClick={handleTileClick}
         workingNow={workingNow}
+        lluviaIntensaActiva={lluviaIntensaActiva}
+        derrumbeActivo={derrumbeActivo}
       />
       <div style={{ position:'absolute', top:0, left:0, width:'100%', height:'100%', background:`rgba(8,12,35,${nightOpacity})`, pointerEvents:'none', zIndex:1, transition:'background 2s ease' }} />
 
@@ -949,19 +1624,36 @@ export default function App() {
         <button onClick={() => setView('setup')} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#0f172a', color:'#fff', fontWeight:700, cursor:'pointer', boxShadow:'0 6px 16px rgba(0,0,0,0.3)', fontSize:'12px' }}>
           ← Configuración
         </button>
-        <button onClick={() => setTimeScale(1)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===1?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+        {isSupervisor && (
+        <>
+        <button onClick={() => changeTimeScale(1)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===1?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
           x1
         </button>
-        <button onClick={() => setTimeScale(4)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===4?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
-          x4
+        <button onClick={() => changeTimeScale(100)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===100?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+          x100
         </button>
-        <button onClick={() => setTimeScale(12)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===12?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
-          x12
+        <button onClick={() => changeTimeScale(500)} style={{ padding:'10px 12px', borderRadius:'10px', border:'none', background:timeScale===500?'#2563eb':'#334155', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+          x500
+        </button>
+        </>
+        )}
+        {isSupervisor && viewingAsPlayer && (
+        <button onClick={() => { setViewingAsPlayer(null); setView('supervisor'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#7c3aed', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+          ← Volver al panel
+        </button>
+        )}
+        <button onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setViewingAsPlayer(null); setView('login'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+          Guardar y salir
         </button>
       </div>
 
       <div style={{ position:'absolute', top:16, left:'50%', transform:'translateX(-50%)', background:'rgba(12,20,32,0.93)', color:'#fff', padding:'12px 24px', borderRadius:'10px', zIndex:3, textAlign:'center', minWidth:'380px', fontSize:'13px' }}>
         <div style={{ fontSize:'17px', fontWeight:700, marginBottom:'4px', color:'#facc15' }}>{projectForm.proyectoNombre || 'Sin nombre'}</div>
+        {isSupervisor && viewingAsPlayer && (
+          <div style={{ fontSize:'11px', color:'#7c3aed', fontWeight:700, marginBottom:'4px' }}>
+            Viendo: {viewingAsPlayer.email.split('@')[0].toUpperCase()}
+          </div>
+        )}
         <div style={{ display:'flex', justifyContent:'center', gap:'20px', color:'#94a3b8', fontSize:'12px' }}>
           <span>Contratista: <b style={{ color:'#e5e7eb' }}>{projectForm.contratistaNombre || '—'}</b></span>
           <span>Interventor: <b style={{ color:'#e5e7eb' }}>{projectForm.interventoriaNombre || '—'}</b></span>
@@ -1124,6 +1816,56 @@ export default function App() {
         </div>
       )}
 
+      {derrumbePendiente && (
+        <div
+          style={{
+            position:'absolute',
+            top:'290px',
+            left:'50%',
+            transform:'translateX(-50%)',
+            zIndex:1100,
+            maxWidth:'760px',
+            width:'calc(100% - 48px)',
+            padding:'14px 18px',
+            borderRadius:'12px',
+            border:'1px solid #f59e0b',
+            background:'rgba(120, 53, 15, 0.95)',
+            color:'#fff7ed',
+            fontWeight:700,
+            fontSize:'14px',
+            textAlign:'center',
+            boxShadow:'0 10px 24px rgba(0,0,0,0.35)',
+          }}
+        >
+          Se ha presedtadol un derrumbre de 3 m3 de tierra y se identificado que hay que hacer una pequeña etabilizcion del talud en una logitud de 2 metros hablen con el supervisor
+        </div>
+      )}
+
+      {false && (
+        <div
+          style={{
+            position:'absolute',
+            top:'290px',
+            left:'50%',
+            transform:'translateX(-50%)',
+            zIndex:1100,
+            maxWidth:'760px',
+            width:'calc(100% - 48px)',
+            padding:'14px 18px',
+            borderRadius:'12px',
+            border:'1px solid #16a34a',
+            background:'rgba(20, 83, 45, 0.95)',
+            color:'#dcfce7',
+            fontWeight:700,
+            fontSize:'14px',
+            textAlign:'center',
+            boxShadow:'0 10px 24px rgba(0,0,0,0.35)',
+          }}
+        >
+          incidencia solucionada no olvides dejar regitro en la botacora de obra
+        </div>
+      )}
+
       <div className="hud" style={{ top:'16px', left:'16px', padding:'14px 18px', minWidth:'260px' }}>
         <div style={{ fontWeight:700, fontSize:'14px', marginBottom:'8px' }}>Notificaciones</div>
         <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
@@ -1132,7 +1874,7 @@ export default function App() {
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
           <span style={{ color:'#94a3b8', fontSize:'12px' }}>Tiempo de obra</span>
-          <span style={{ fontFamily:'monospace', fontWeight:600, fontSize:'12px', color:'#4ade80' }}>{workDays.toFixed(1)} días</span>
+          <span style={{ fontFamily:'monospace', fontWeight:600, fontSize:'12px', color:'#4ade80' }}>{workTimeDisplay}</span>
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
           <span style={{ color:'#94a3b8', fontSize:'12px' }}>Hora del juego</span>
@@ -1160,6 +1902,25 @@ export default function App() {
               <span>{n.icon}</span><span style={{ color:'#cbd5e1' }}>{n.text}</span>
             </div>
           ))}
+        </div>
+      </div>
+
+      <div style={{ position:'absolute', bottom:'16px', left:'300px', background:'rgba(12,20,32,0.93)', color:'#fff', padding:'14px 16px', borderRadius:'10px', zIndex:3, minWidth:'280px', maxWidth:'320px', fontSize:'12px' }}>
+        <div style={{ fontWeight:700, fontSize:'13px', marginBottom:'8px' }}>Puntaje</div>
+        <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
+          <span style={{ color:'#94a3b8' }}>Puntaje actual</span>
+          <span style={{ fontWeight:700, color:score > 40 ? '#4ade80' : '#facc15' }}>{score.toFixed(1)}</span>
+        </div>
+        <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
+          <span style={{ color:'#94a3b8' }}>Cambios valor contrato</span>
+          <span>{cambiosContratoValorRef.current}</span>
+        </div>
+        <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
+          <span style={{ color:'#94a3b8' }}>Cambios duración</span>
+          <span>{cambiosContratoDuracionRef.current}</span>
+        </div>
+        <div style={{ marginTop:'8px', paddingTop:'8px', borderTop:'1px solid #334155', color:'#94a3b8', fontSize:'11px' }}>
+          Puntaje inicial: 50 · Puntaje mínimo: 35
         </div>
       </div>
 
@@ -1208,7 +1969,9 @@ export default function App() {
         </div>
       </div>
 
-      <div className="hint">Arrastra para mover · Scroll para zoom · Clic en vía gris para iniciar obra</div>
+      {!gameStarted && (
+        <div className="hint">Arrastra para mover · Scroll para zoom · Clic en vía gris para iniciar obra</div>
+      )}
     </div>
   );
 }
