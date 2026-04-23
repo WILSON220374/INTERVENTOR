@@ -106,12 +106,12 @@ export default function App() {
   const [viewingAsPlayer, setViewingAsPlayer] = useState<{id: string; email: string} | null>(null);
   const [projectForm, setProjectForm] = useState<ProjectFormState>(INITIAL_FORM);
   const [notifs, setNotifs] = useState<Notif[]>([]);
-  const [gameHourDisplay, setGameHourDisplay] = useState('Día 1 - 07:00');
+  const [gameHourDisplay, setGameHourDisplay] = useState('');
   const [isNight, setIsNight] = useState(false);
   const [nightOpacity, setNightOpacity] = useState(0);
-  const [elapsed, setElapsed] = useState('00:00:00');
+  const [elapsed, setElapsed] = useState('');
   const [workDays, setWorkDays] = useState(0);
-  const [workTimeDisplay, setWorkTimeDisplay] = useState('Día 1 - 07:00');
+  const [workTimeDisplay, setWorkTimeDisplay] = useState('');
   const [startTile, setStartTile] = useState<{r:number;c:number}|null>(null);
   const [roadProgress, setRoadProgress] = useState(0);
   const [projectProgress, setProjectProgress] = useState(0);
@@ -154,6 +154,15 @@ export default function App() {
   const lluviaAudioRef = useRef<HTMLAudioElement | null>(null);
   const loadedRef = useRef(false);
 
+  // Limpiar sesión vieja al cargar la página
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session && view === 'login') {
+        supabase.auth.signOut();
+      }
+    });
+  }, []);
+
   // Cargar pagos e incidencias de Supabase para el jugador
   useEffect(() => {
     if (!currentUser) return;
@@ -188,6 +197,17 @@ export default function App() {
             asignado: cols.reduce((sum: number, c: any) => sum + (Number(a.pagos?.[c.id]) || 0), 0),
           })),
         }));
+      } else {
+        setProjectForm(prev => ({
+          ...prev,
+          pagosCols: [{ id: 'anticipo', label: 'ANTICIPO' }],
+          pagosGlobales: { anticipo: 0 },
+          actividades: prev.actividades.map(a => ({
+            ...a,
+            pagos: { anticipo: 0 },
+            asignado: 0,
+          })),
+        }));
       }
 
       // Cargar incidencias
@@ -196,7 +216,18 @@ export default function App() {
         .select('*')
         .eq('user_id', targetUserId);
 
-      if (incidents) {
+      // Resetear todas primero
+      setManifestacionComunidadActiva(false);
+      setManifestacionComunidadPendiente(false);
+      setDemoraMaterialesActiva(false);
+      setDemoraMaterialesPendiente(false);
+      setAccidenteObraActiva(false);
+      setAccidenteObraPendiente(false);
+      setLluviaIntensaActiva(false);
+      setDerrumbeActivo(false);
+      setDerrumbePendiente(false);
+
+      if (incidents && incidents.length > 0) {
         for (const inc of incidents) {
           if (inc.incident_type === 'manifestacion_comunidad') {
             setManifestacionComunidadActiva(inc.is_active);
@@ -283,10 +314,10 @@ export default function App() {
     cambiosContratoValorRef.current = 0;
     cambiosContratoDuracionRef.current = 0;
 
-    setElapsed('00:00:00');
-    setGameHourDisplay('Día 1 - 07:00');
+    setElapsed('');
+    setGameHourDisplay('');
     setWorkDays(0);
-    setWorkTimeDisplay('Día 1 - 07:00');
+    setWorkTimeDisplay('');
     setStartTile(null);
     setRoadProgress(0);
     setProjectProgress(0);
@@ -321,7 +352,7 @@ export default function App() {
     if (!currentUser || isSupervisor) return;
 
     // Calcular el tiempo de juego TOTAL incluyendo la sesión actual
-    const currentGameMs = accumulatedGameMsRef.current + (Date.now() - lastRealTickRef.current) * 12 * timeScale;
+    const currentGameMs = accumulatedGameMsRef.current + (Date.now() - lastRealTickRef.current) * 10 * timeScale;
     // Actualizar refs para que el juego siga correctamente
     accumulatedGameMsRef.current = currentGameMs;
     lastRealTickRef.current = Date.now();
@@ -380,10 +411,10 @@ export default function App() {
       if (data.suspended || data.recursosAgotados) {
         // Juego estaba detenido: el tiempo offline se suma como tiempo suspendido
         suspendedTimeRef.current = (data.suspendedTime || 0) + offlineRealMs;
-        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 12);
+        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 10);
       } else {
         // Juego estaba corriendo: avanzar normalmente (velocidad x1)
-        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 12);
+        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 10);
       }
     } else {
       accumulatedGameMsRef.current = savedMs;
@@ -420,7 +451,7 @@ function changeTimeScale(newScale: number) {
   const now = Date.now();
   const realDelta = now - lastRealTickRef.current;
 
-  accumulatedGameMsRef.current += realDelta * 12 * timeScale;
+  accumulatedGameMsRef.current += realDelta * 10 * timeScale;
   lastRealTickRef.current = now;
 
   setTimeScale(newScale);
@@ -775,18 +806,26 @@ function resolverManifestacionComunidad() {
       if (!gameStarted || !startTile || obraFinished) return;
 
       const realEl = gameStartedAtRef.current > 0 ? Date.now() - gameStartedAtRef.current : 0;
-      const eh = Math.floor(realEl / 3600000);
-      const em = Math.floor((realEl % 3600000) / 60000);
-      const es = Math.floor((realEl % 60000) / 1000);
-      setElapsed(`${String(eh).padStart(2,'0')}:${String(em).padStart(2,'0')}:${String(es).padStart(2,'0')}`);
+      const months = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+
+      // Reloj blanco: fecha y hora REAL
+      const realNow = new Date();
+      const realDateStr = `${realNow.getDate()} ${months[realNow.getMonth()]} ${realNow.getFullYear()}`;
+      const rh = String(realNow.getHours()).padStart(2,'0');
+      const rm = String(realNow.getMinutes()).padStart(2,'0');
+      const rs = String(realNow.getSeconds()).padStart(2,'0');
+      setElapsed(`${realDateStr} - ${rh}:${rm}:${rs}`);
 
       const realDelta = Date.now() - lastRealTickRef.current;
-      const gameMs = accumulatedGameMsRef.current + realDelta * 12 * timeScale;
+      const gameMs = accumulatedGameMsRef.current + realDelta * 10 * timeScale;
       const gameTotalHours = gameMs / 3600000 + 7;
       const gDay = Math.floor(gameTotalHours / 24) + 1;
       const gHour = Math.floor(gameTotalHours % 24);
       const gMin = Math.floor(((gameTotalHours % 1) * 60) % 60);
-      setGameHourDisplay(`Día ${gDay} - ${String(gHour).padStart(2,'0')}:${String(gMin).padStart(2,'0')}`);
+
+      // Fecha del juego: base = fecha real de inicio + días de juego
+      const baseDate = new Date(gameStartedAtRef.current || Date.now());
+      baseDate.setHours(0, 0, 0, 0);
 
       const daytime = gHour >= 7 && gHour < 18;
       setIsDaytime(daytime);
@@ -805,7 +844,7 @@ function resolverManifestacionComunidad() {
         : suspendedTimeRef.current;
 
       const totalGameDays = gameMs / 3600000 / 24;
-      const suspGameDays = (suspTime * 12 * timeScale) / 3600000 / 24;
+      const suspGameDays = (suspTime * 10 * timeScale) / 3600000 / 24;
       const effWorkDays = Math.max(0, totalGameDays - suspGameDays);
 
       const workTotalHours = effWorkDays * 24 + 7;
@@ -813,7 +852,19 @@ function resolverManifestacionComunidad() {
       const workHour = Math.floor(workTotalHours % 24);
       const workMin = Math.floor(((workTotalHours % 1) * 60) % 60);
       setWorkDays(effWorkDays);
-      setWorkTimeDisplay(`Día ${workDay} - ${String(workHour).padStart(2,'0')}:${String(workMin).padStart(2,'0')}`);
+      const workDate = new Date(baseDate.getTime() + (workDay - 1) * 86400000);
+      const workDateStr = `${workDate.getDate()} ${months[workDate.getMonth()]} ${workDate.getFullYear()}`;
+      setWorkTimeDisplay(`${workDateStr} - ${String(workHour).padStart(2,'0')}:${String(workMin).padStart(2,'0')}`);
+
+      // Tiempo de obra: horas efectivas de trabajo (11h/día: 7am-6pm)
+      const totalWorkHours = effWorkDays * 11;
+      const twDays = Math.floor(totalWorkHours / 24);
+      const twHours = Math.floor(totalWorkHours % 24);
+      const twMins = Math.floor((totalWorkHours % 1) * 60);
+      setGameHourDisplay(twDays > 0
+        ? `${twDays}d ${twHours}h ${twMins}m`
+        : `${twHours}h ${twMins}m`
+      );
 
       const diferenciaTiempoPct = gameTotalHours > 0
         ? (Math.abs(gameTotalHours - workTotalHours) / gameTotalHours) * 100
@@ -1125,6 +1176,8 @@ function resolverManifestacionComunidad() {
       <LoginScreen onLogin={async (user, role) => {
         setCurrentUser(user);
         setCurrentRole(role);
+        resetGameState(false);
+        setProjectForm(INITIAL_FORM);
         if (user.email === 'supervisor@constructor.co') {
           setView('supervisor');
         } else {
@@ -1233,10 +1286,10 @@ function resolverManifestacionComunidad() {
                     lastRealTickRef.current = Date.now();
                     startRef.current = Date.now();
                     gameStartedAtRef.current = Date.now();
-                    setElapsed('00:00:00');
-                    setGameHourDisplay('Día 1 - 07:00');
+                    setElapsed('');
+                    setGameHourDisplay('');
                     setWorkDays(0);
-                    setWorkTimeDisplay('Día 1 - 07:00');
+                    setWorkTimeDisplay('');
 
                     setLiveActs(projectForm.actividades.map(a => ({
                       ...a,
@@ -1318,7 +1371,7 @@ function resolverManifestacionComunidad() {
               )}
 
               <button
-                onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setView('login'); }}
+                onClick={async () => { await saveGameState(); await supabase.auth.signOut(); window.location.reload(); }}
                 style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
               >
                 Guardar y salir
@@ -1649,7 +1702,7 @@ function resolverManifestacionComunidad() {
           ← Volver al panel
         </button>
         )}
-        <button onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setViewingAsPlayer(null); setView('login'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+        <button onClick={async () => { await saveGameState(); await supabase.auth.signOut(); window.location.reload(); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
           Guardar y salir
         </button>
       </div>
@@ -1873,18 +1926,28 @@ function resolverManifestacionComunidad() {
         </div>
       )}
 
-      <div className="hud" style={{ top:'16px', left:'16px', padding:'14px 18px', minWidth:'260px' }}>
+      <div className="hud" style={{ top:'16px', left:'16px', padding:'14px 18px', minWidth:'340px' }}>
         <div style={{ fontWeight:700, fontSize:'14px', marginBottom:'8px' }}>Notificaciones</div>
         <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
-          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Tiempo desde inicio</span>
+          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Fecha de inicio</span>
+          <span style={{ fontFamily:'monospace', fontWeight:600, fontSize:'12px', color:'#c084fc' }}>
+            {gameStartedAtRef.current > 0 ? (() => {
+              const d = new Date(gameStartedAtRef.current);
+              const m = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+              return `${d.getDate()} ${m[d.getMonth()]} ${d.getFullYear()} - ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+            })() : '—'}
+          </span>
+        </div>
+        <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
+          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Fecha real</span>
           <span style={{ fontFamily:'monospace', fontWeight:600, fontSize:'12px' }}>{elapsed}</span>
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
-          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Tiempo de obra</span>
+          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Fecha de obra</span>
           <span style={{ fontFamily:'monospace', fontWeight:600, fontSize:'12px', color:'#4ade80' }}>{workTimeDisplay}</span>
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
-          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Hora del juego</span>
+          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Tiempo de obra</span>
           <span style={{ fontFamily:'monospace', fontWeight:600, fontSize:'12px', color:'#facc15' }}>{gameHourDisplay}</span>
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
