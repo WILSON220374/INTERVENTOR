@@ -123,6 +123,7 @@ export default function App() {
   const [gameStarted, setGameStarted] = useState(false);
   const [timeScale, setTimeScale] = useState(1);
   const [score, setScore] = useState(50);
+  const [tiempoDetenidoPct, setTiempoDetenidoPct] = useState(0);
   const [manifestacionComunidadActiva, setManifestacionComunidadActiva] = useState(false);
   const [manifestacionComunidadPendiente, setManifestacionComunidadPendiente] = useState(false);
   const [manifestacionComunidadResuelta, setManifestacionComunidadResuelta] = useState(false);
@@ -402,6 +403,8 @@ export default function App() {
     if (data.suspendedTime !== undefined) suspendedTimeRef.current = data.suspendedTime;
     if (data.cambiosContratoValor !== undefined) cambiosContratoValorRef.current = data.cambiosContratoValor;
     if (data.cambiosContratoDuracion !== undefined) cambiosContratoDuracionRef.current = data.cambiosContratoDuracion;
+    if (data.projectForm?.contratoValor) initialContratoValorRef.current = data.projectForm.contratoValor;
+    if (data.projectForm?.contratoDuracion) initialContratoDuracionRef.current = data.projectForm.contratoDuracion;
     if (data.gameStartedAt) gameStartedAtRef.current = data.gameStartedAt;
 
     // Calcular tiempo offline y avanzar el juego
@@ -876,6 +879,7 @@ function resolverManifestacionComunidad() {
       const nuevoPuntaje = Math.max(35, 50 - descuentoTiempo - descuentoCambiosValor - descuentoCambiosDuracion);
 
       setScore(nuevoPuntaje);
+      setTiempoDetenidoPct(diferenciaTiempoPct);
 
       const totalPagos = totalPagosGlobales();
       const totalAsignado = totalAsignadoGeneral();
@@ -1989,9 +1993,11 @@ function resolverManifestacionComunidad() {
           <span style={{ color:'#94a3b8' }}>Cambios duración</span>
           <span>{cambiosContratoDuracionRef.current}</span>
         </div>
-        <div style={{ marginTop:'8px', paddingTop:'8px', borderTop:'1px solid #334155', color:'#94a3b8', fontSize:'11px' }}>
-          Puntaje inicial: 50 · Puntaje mínimo: 35
+        <div style={{ display:'flex', justifyContent:'space-between', margin:'4px 0' }}>
+          <span style={{ color:'#94a3b8', fontSize:'12px' }}>Tiempo detenido</span>
+          <span style={{ fontFamily:'monospace', fontWeight:600, fontSize:'12px', color: tiempoDetenidoPct > 60 ? '#fca5a5' : '#94a3b8' }}>{tiempoDetenidoPct.toFixed(1)}%</span>
         </div>
+        <div style={{ marginTop:'6px', fontSize:'10px', color:'#64748b' }}>Puntaje inicial: 50 · Mínimo: 35 · Descuenta después de 60% detenido</div>
       </div>
 
       <div style={{ position:'absolute', bottom:'16px', right:'16px', background:'rgba(12,20,32,0.93)', color:'#fff', padding:'14px 16px', borderRadius:'10px', zIndex:3, minWidth:'440px', maxWidth:'520px', maxHeight:'320px', overflowY:'auto', fontSize:'12px' }}>
