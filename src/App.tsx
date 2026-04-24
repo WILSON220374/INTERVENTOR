@@ -154,6 +154,37 @@ export default function App() {
   const nocheAudioRef = useRef<HTMLAudioElement | null>(null);
   const lluviaAudioRef = useRef<HTMLAudioElement | null>(null);
   const loadedRef = useRef(false);
+  const saveSnapshotRef = useRef<{
+    projectForm: ProjectFormState;
+    gameStarted: boolean;
+    startTile: {r:number;c:number}|null;
+    roadProgress: number;
+    projectProgress: number;
+    workDays: number;
+    score: number;
+    suspended: boolean;
+    obraFinished: boolean;
+    recursosAgotados: boolean;
+    timeScale: number;
+    liveActs: ActivityRow[];
+  } | null>(null);
+
+  // Mantener snapshot actualizado del estado para que saveGameState
+  // siempre tenga la versión más reciente sin necesidad de estar en las deps
+  saveSnapshotRef.current = {
+    projectForm,
+    gameStarted,
+    startTile,
+    roadProgress,
+    projectProgress,
+    workDays,
+    score,
+    suspended,
+    obraFinished,
+    recursosAgotados,
+    timeScale,
+    liveActs,
+  };
 
   // Cargar pagos e incidencias de Supabase para el jugador
   useEffect(() => {
@@ -340,28 +371,30 @@ export default function App() {
 
   async function saveGameState() {
     if (!currentUser || isSupervisor) return;
+    const snap = saveSnapshotRef.current;
+    if (!snap) return;
 
     // Calcular el tiempo de juego TOTAL incluyendo la sesión actual
-    const currentGameMs = accumulatedGameMsRef.current + (Date.now() - lastRealTickRef.current) * 10 * timeScale;
+    const currentGameMs = accumulatedGameMsRef.current + (Date.now() - lastRealTickRef.current) * 10 * snap.timeScale;
     // Actualizar refs para que el juego siga correctamente
     accumulatedGameMsRef.current = currentGameMs;
     lastRealTickRef.current = Date.now();
 
     const state = {
       email: currentUser.email,
-      projectForm,
-      gameStarted,
-      startTile,
+      projectForm: snap.projectForm,
+      gameStarted: snap.gameStarted,
+      startTile: snap.startTile,
       accumulatedGameMs: currentGameMs,
-      roadProgress,
-      projectProgress,
-      workDays,
-      score,
-      suspended,
-      obraFinished,
-      recursosAgotados,
-      timeScale,
-      liveActs,
+      roadProgress: snap.roadProgress,
+      projectProgress: snap.projectProgress,
+      workDays: snap.workDays,
+      score: snap.score,
+      suspended: snap.suspended,
+      obraFinished: snap.obraFinished,
+      recursosAgotados: snap.recursosAgotados,
+      timeScale: snap.timeScale,
+      liveActs: snap.liveActs,
       suspendedTime: suspendedTimeRef.current,
       cambiosContratoValor: cambiosContratoValorRef.current,
       cambiosContratoDuracion: cambiosContratoDuracionRef.current,
@@ -372,6 +405,58 @@ export default function App() {
       .from('game_state')
       .update({ project_data: state, updated_at: new Date().toISOString() })
       .eq('user_id', currentUser.id);
+  }
+
+  // Versión síncrona para usar en beforeunload (cierre de pestaña).
+  // Usa sendBeacon para garantizar que el request salga aunque el navegador
+  // esté cerrándose. sendBeacon es la única API que el navegador respeta
+  // durante el unload sin bloquearlo.
+  function saveGameStateSync() {
+    if (!currentUser || isSupervisor) return;
+    const snap = saveSnapshotRef.current;
+    if (!snap) return;
+
+    const currentGameMs = accumulatedGameMsRef.current + (Date.now() - lastRealTickRef.current) * 10 * snap.timeScale;
+
+    const state = {
+      email: currentUser.email,
+      projectForm: snap.projectForm,
+      gameStarted: snap.gameStarted,
+      startTile: snap.startTile,
+      accumulatedGameMs: currentGameMs,
+      roadProgress: snap.roadProgress,
+      projectProgress: snap.projectProgress,
+      workDays: snap.workDays,
+      score: snap.score,
+      suspended: snap.suspended,
+      obraFinished: snap.obraFinished,
+      recursosAgotados: snap.recursosAgotados,
+      timeScale: snap.timeScale,
+      liveActs: snap.liveActs,
+      suspendedTime: suspendedTimeRef.current,
+      cambiosContratoValor: cambiosContratoValorRef.current,
+      cambiosContratoDuracion: cambiosContratoDuracionRef.current,
+      gameStartedAt: gameStartedAtRef.current,
+      lastSavedAt: Date.now(),
+    };
+
+    // Intento principal: sendBeacon a la API REST de Supabase
+    try {
+      const supabaseUrl = (supabase as any).supabaseUrl || (supabase as any).restUrl;
+      const supabaseKey = (supabase as any).supabaseKey;
+      if (supabaseUrl && supabaseKey && navigator.sendBeacon) {
+        const url = `${supabaseUrl}/rest/v1/game_state?user_id=eq.${currentUser.id}`;
+        const body = JSON.stringify({ project_data: state, updated_at: new Date().toISOString() });
+        const blob = new Blob([body], { type: 'application/json' });
+        navigator.sendBeacon(url, blob);
+        return;
+      }
+    } catch {
+      // Fallback al método async si sendBeacon falla
+    }
+
+    // Fallback: dispara el guardado async (puede no completarse a tiempo)
+    saveGameState();
   }
 
   function loadGameState(data: any) {
@@ -441,7 +526,7 @@ export default function App() {
             totalSpent += newInvertido;
             return {
               ...act,
-              invertido: Math.round(newInvertido),
+              invertido: Number(newInvertido.toFixed(2)),
               avance: Math.min(100, Number(((newInvertido / valorAct) * 100).toFixed(1))),
             };
           });
@@ -451,7 +536,7 @@ export default function App() {
             const ratio = topeGlobal / totalSpent;
             for (const act of simulatedActs) {
               if (Number(act.invertido) > 0) {
-                act.invertido = Math.round(Number(act.invertido) * ratio);
+                act.invertido = Number((Number(act.invertido) * ratio).toFixed(2));
                 const valorAct = Number(act.valor) || 1;
                 act.avance = Math.min(100, Number(((act.invertido / valorAct) * 100).toFixed(1)));
               }
@@ -479,12 +564,44 @@ export default function App() {
     startRef.current = Date.now();
   }
 
-  // Auto-guardar cada 10 segundos
+  // Auto-guardar cada 10 segundos.
+  // IMPORTANTE: las dependencias se mantienen mínimas a propósito.
+  // Si agregamos liveActs/projectForm/score/etc, el setInterval se reinicia
+  // cada 500ms (porque esos valores cambian con el ticker del juego)
+  // y el guardado nunca se ejecuta. El estado siempre actualizado se lee
+  // desde saveSnapshotRef.current dentro de saveGameState().
   useEffect(() => {
     if (!currentUser || isSupervisor || !gameStarted) return;
     const interval = setInterval(saveGameState, 10000);
     return () => clearInterval(interval);
-  }, [currentUser, isSupervisor, gameStarted, projectForm, roadProgress, score, workDays, liveActs, obraFinished, suspended]);
+  }, [currentUser, isSupervisor, gameStarted]);
+
+  // Guardado de seguridad: cuando el usuario cierra la pestaña, recarga,
+  // cierra el navegador o cambia de pestaña, intentamos guardar con sendBeacon
+  // (la única API que garantiza que el request salga durante el unload).
+  useEffect(() => {
+    if (!currentUser || isSupervisor || !gameStarted) return;
+
+    const handleBeforeUnload = () => {
+      saveGameStateSync();
+    };
+
+    const handleVisibilityChange = () => {
+      // Cuando la pestaña se oculta (cambio de pestaña, minimizar móvil)
+      // también guardamos por si el navegador la mata después
+      if (document.visibilityState === 'hidden') {
+        saveGameStateSync();
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [currentUser, isSupervisor, gameStarted]);
 
   // ============ FIN PERSISTENCIA ============
 
@@ -963,7 +1080,7 @@ function resolverManifestacionComunidad() {
           return {
             ...act,
             avance: Number(newAvance.toFixed(1)),
-            invertido: Math.round(newInvertido),
+            invertido: Number(newInvertido.toFixed(2)),
           };
         });
 
@@ -983,7 +1100,7 @@ function resolverManifestacionComunidad() {
 
             updated[i] = {
               ...actual,
-              invertido: Math.round(invertidoAjustado),
+              invertido: Number(invertidoAjustado.toFixed(2)),
               avance: Number(avanceAjustado.toFixed(1)),
             };
 
@@ -2076,7 +2193,7 @@ function resolverManifestacionComunidad() {
                     <span style={{ fontSize:'11px' }}>{act.avance}%</span>
                   </div>
                 </td>
-                <td style={{ padding:'5px 6px', borderBottom:'1px solid #1e293b', textAlign:'right', color:'#60a5fa' }}>${act.invertido.toLocaleString('es-CO')}M</td>
+                <td style={{ padding:'5px 6px', borderBottom:'1px solid #1e293b', textAlign:'right', color:'#60a5fa' }}>${act.invertido.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}M</td>
               </tr>
             ))}
           </tbody>
@@ -2084,7 +2201,7 @@ function resolverManifestacionComunidad() {
 
         <div style={{ borderTop:'1px solid #334155', marginTop:'8px', paddingTop:'8px', display:'flex', justifyContent:'space-between', fontWeight:700, fontSize:'12px' }}>
           <span>Invertido total</span>
-          <span style={{ color:'#60a5fa' }}>${totalInv.toLocaleString('es-CO')}M / ${Math.min(totalPagos, asigTotal).toLocaleString('es-CO')}M</span>
+          <span style={{ color:'#60a5fa' }}>${totalInv.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}M / ${Math.min(totalPagos, asigTotal).toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}M</span>
         </div>
       </div>
 
