@@ -106,12 +106,12 @@ export default function App() {
   const [viewingAsPlayer, setViewingAsPlayer] = useState<{id: string; email: string} | null>(null);
   const [projectForm, setProjectForm] = useState<ProjectFormState>(INITIAL_FORM);
   const [notifs, setNotifs] = useState<Notif[]>([]);
-  const [gameHourDisplay, setGameHourDisplay] = useState('');
+  const [gameHourDisplay, setGameHourDisplay] = useState('Día 1 - 07:00');
   const [isNight, setIsNight] = useState(false);
   const [nightOpacity, setNightOpacity] = useState(0);
-  const [elapsed, setElapsed] = useState('');
+  const [elapsed, setElapsed] = useState('00:00:00');
   const [workDays, setWorkDays] = useState(0);
-  const [workTimeDisplay, setWorkTimeDisplay] = useState('');
+  const [workTimeDisplay, setWorkTimeDisplay] = useState('Día 1 - 07:00');
   const [startTile, setStartTile] = useState<{r:number;c:number}|null>(null);
   const [roadProgress, setRoadProgress] = useState(0);
   const [projectProgress, setProjectProgress] = useState(0);
@@ -155,19 +155,9 @@ export default function App() {
   const lluviaAudioRef = useRef<HTMLAudioElement | null>(null);
   const loadedRef = useRef(false);
 
-  // Limpiar sesión vieja al cargar la página
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session && view === 'login') {
-        supabase.auth.signOut();
-      }
-    });
-  }, []);
-
   // Cargar pagos e incidencias de Supabase para el jugador
   useEffect(() => {
     if (!currentUser) return;
-    // Supervisor no necesita polling — ve los datos desde su panel
     if (isSupervisor) return;
 
     const targetUserId = currentUser.id;
@@ -190,15 +180,8 @@ export default function App() {
           ...prev,
           pagosCols: cols,
           pagosGlobales: globales,
-          actividades: prev.actividades.map(a => ({
-            ...a,
-            pagos: {
-              ...Object.fromEntries(cols.map((c: any) => [c.id, a.pagos?.[c.id] || 0])),
-            },
-            asignado: cols.reduce((sum: number, c: any) => sum + (Number(a.pagos?.[c.id]) || 0), 0),
-          })),
         }));
-      } else {
+      } else if (!gameStarted) {
         setProjectForm(prev => ({
           ...prev,
           pagosCols: [{ id: 'anticipo', label: 'ANTICIPO' }],
@@ -211,13 +194,7 @@ export default function App() {
         }));
       }
 
-      // Cargar incidencias
-      const { data: incidents } = await supabase
-        .from('game_incidents')
-        .select('*')
-        .eq('user_id', targetUserId);
-
-      // Resetear todas primero
+      // Cargar incidencias - resetear primero
       setManifestacionComunidadActiva(false);
       setManifestacionComunidadPendiente(false);
       setDemoraMaterialesActiva(false);
@@ -227,6 +204,11 @@ export default function App() {
       setLluviaIntensaActiva(false);
       setDerrumbeActivo(false);
       setDerrumbePendiente(false);
+
+      const { data: incidents } = await supabase
+        .from('game_incidents')
+        .select('*')
+        .eq('user_id', targetUserId);
 
       if (incidents && incidents.length > 0) {
         for (const inc of incidents) {
@@ -256,7 +238,7 @@ export default function App() {
     loadFromSupabase();
     const interval = setInterval(loadFromSupabase, 5000);
     return () => clearInterval(interval);
-  }, [currentUser, isSupervisor]);
+  }, [currentUser, isSupervisor, gameStarted]);
 
   function pushNotif(icon: string, text: string) {
     const id = ++nidRef.current;
@@ -315,10 +297,10 @@ export default function App() {
     cambiosContratoValorRef.current = 0;
     cambiosContratoDuracionRef.current = 0;
 
-    setElapsed('');
-    setGameHourDisplay('');
+    setElapsed('00:00:00');
+    setGameHourDisplay('Día 1 - 07:00');
     setWorkDays(0);
-    setWorkTimeDisplay('');
+    setWorkTimeDisplay('Día 1 - 07:00');
     setStartTile(null);
     setRoadProgress(0);
     setProjectProgress(0);
@@ -411,13 +393,76 @@ export default function App() {
     const savedMs = data.accumulatedGameMs || 0;
     if (data.lastSavedAt && data.gameStarted && !data.obraFinished) {
       const offlineRealMs = Date.now() - data.lastSavedAt;
+      
       if (data.suspended || data.recursosAgotados) {
-        // Juego estaba detenido: el tiempo offline se suma como tiempo suspendido
+        // Juego estaba detenido: NO avanzar obra, solo sumar tiempo suspendido
         suspendedTimeRef.current = (data.suspendedTime || 0) + offlineRealMs;
         accumulatedGameMsRef.current = savedMs + (offlineRealMs * 10);
       } else {
-        // Juego estaba corriendo: avanzar normalmente (velocidad x1)
-        accumulatedGameMsRef.current = savedMs + (offlineRealMs * 10);
+        // Juego estaba corriendo: avanzar normalmente
+        const newGameMs = savedMs + (offlineRealMs * 10);
+        accumulatedGameMsRef.current = newGameMs;
+        
+        // Calcular los días de trabajo efectivos NUEVOS
+        const newTotalGameDays = newGameMs / 3600000 / 24;
+        const suspDays = ((data.suspendedTime || 0) * 10) / 3600000 / 24;
+        const newEffWorkDays = Math.max(0, newTotalGameDays - suspDays);
+        
+        // Simular el avance offline para cada actividad
+        if (data.liveActs) {
+          const totalPagos = data.projectForm?.pagosCols?.reduce((sum: number, col: any) => 
+            sum + (Number(data.projectForm.pagosGlobales?.[col.id]) || 0), 0) || 0;
+          const totalAsignado = data.liveActs.reduce((sum: number, a: any) => sum + (Number(a.asignado) || 0), 0);
+          const topeGlobal = Math.min(totalPagos, totalAsignado);
+          
+          let totalSpent = 0;
+          const simulatedActs = data.liveActs.map((act: any) => {
+            const dur = Number(act.duracion) || 0;
+            const valorAct = Number(act.valor) || 0;
+            const asignado = Number(act.asignado) || 0;
+            
+            if (!act.nombre || dur <= 0 || valorAct <= 0 || asignado <= 0 || !act.activa) {
+              totalSpent += Number(act.invertido) || 0;
+              return act;
+            }
+            
+            const valorDia = valorAct / (Number(data.projectForm?.contratoDuracion) || dur);
+            const diasNuevos = Math.max(0, newEffWorkDays - (act.baseWorkDay || 0));
+            const invertidoBase = Number(act.baseInvertido) || 0;
+            let newInvertido = Math.min(asignado, invertidoBase + (valorDia * diasNuevos));
+            
+            totalSpent += newInvertido;
+            return {
+              ...act,
+              invertido: Math.round(newInvertido),
+              avance: Math.min(100, Number(((newInvertido / valorAct) * 100).toFixed(1))),
+            };
+          });
+          
+          // Si excede el tope, recortar
+          if (totalSpent > topeGlobal && topeGlobal > 0) {
+            const ratio = topeGlobal / totalSpent;
+            for (const act of simulatedActs) {
+              if (Number(act.invertido) > 0) {
+                act.invertido = Math.round(Number(act.invertido) * ratio);
+                const valorAct = Number(act.valor) || 1;
+                act.avance = Math.min(100, Number(((act.invertido / valorAct) * 100).toFixed(1)));
+              }
+            }
+            // La obra se detuvo por recursos
+            suspendStartRef.current = Date.now();
+            setRecursosAgotados(true);
+          }
+          
+          // Actualizar baseWorkDay y baseInvertido para que el tick continúe correctamente
+          const finalActs = simulatedActs.map((act: any) => ({
+            ...act,
+            baseWorkDay: newEffWorkDays,
+            baseInvertido: Number(act.invertido) || 0,
+          }));
+          
+          setLiveActs(finalActs);
+        }
       }
     } else {
       accumulatedGameMsRef.current = savedMs;
@@ -782,18 +827,11 @@ function resolverManifestacionComunidad() {
         }
 
         setLiveActs(prev =>
-          prev.map(act => {
-            const formAct = projectForm.actividades.find(a => a.id === act.id);
-            const nuevoAsignado = formAct
-              ? projectForm.pagosCols.reduce((sum, col) => sum + (Number(formAct.pagos?.[col.id]) || 0), 0)
-              : act.asignado;
-            return {
-              ...act,
-              asignado: nuevoAsignado,
-              baseWorkDay: Number(act.invertido) < nuevoAsignado ? workDays : act.baseWorkDay,
-              baseInvertido: Number(act.invertido) < nuevoAsignado ? act.invertido : act.baseInvertido,
-            };
-          })
+          prev.map(act => ({
+            ...act,
+            baseWorkDay: Number(act.invertido) < Number(act.asignado) ? workDays : act.baseWorkDay,
+            baseInvertido: Number(act.invertido) < Number(act.asignado) ? act.invertido : act.baseInvertido,
+          }))
         );
 
         setRecursosAgotados(false);
@@ -826,9 +864,11 @@ function resolverManifestacionComunidad() {
       const gHour = Math.floor(gameTotalHours % 24);
       const gMin = Math.floor(((gameTotalHours % 1) * 60) % 60);
 
-      // Fecha del juego: base = fecha real de inicio + días de juego
+      // Fecha de obra: base = fecha real de inicio + días de juego
       const baseDate = new Date(gameStartedAtRef.current || Date.now());
       baseDate.setHours(0, 0, 0, 0);
+      const gameDate = new Date(baseDate.getTime() + (gDay - 1) * 86400000);
+      const gameDateStr = `${gameDate.getDate()} ${months[gameDate.getMonth()]} ${gameDate.getFullYear()}`;
 
       const daytime = gHour >= 7 && gHour < 18;
       setIsDaytime(daytime);
@@ -864,14 +904,11 @@ function resolverManifestacionComunidad() {
       const twDays = Math.floor(totalWorkHours / 24);
       const twHours = Math.floor(totalWorkHours % 24);
       const twMins = Math.floor((totalWorkHours % 1) * 60);
-      setGameHourDisplay(twDays > 0
-        ? `${twDays}d ${twHours}h ${twMins}m`
-        : `${twHours}h ${twMins}m`
-      );
+      setGameHourDisplay(twDays > 0 ? `${twDays}d ${twHours}h ${twMins}m` : `${twHours}h ${twMins}m`);
 
-      const diferenciaTiempoPct = gameTotalHours > 0
-        ? (Math.abs(gameTotalHours - workTotalHours) / gameTotalHours) * 100
-        : 0;
+      const contratoDurDias = Number(projectForm.contratoDuracion) || 1;
+      const diasDetenidos = totalGameDays - effWorkDays;
+      const diferenciaTiempoPct = (diasDetenidos / contratoDurDias) * 100;
 
       const descuentoTiempo = Math.max(0, Math.floor(diferenciaTiempoPct) - 60);
       const descuentoCambiosValor = Math.max(0, cambiosContratoValorRef.current - 1) * 5;
@@ -903,7 +940,8 @@ function resolverManifestacionComunidad() {
             };
           }
 
-          const valorDiaActividad = valorAct / dur;
+          const contratoDur = Number(projectForm.contratoDuracion) || dur;
+          const valorDiaActividad = valorAct / contratoDur;
           const diasNuevos = Math.max(0, effWorkDays - (act.baseWorkDay || 0));
           const invertidoBase = Number(act.baseInvertido) || 0;
 
@@ -1180,8 +1218,6 @@ function resolverManifestacionComunidad() {
       <LoginScreen onLogin={async (user, role) => {
         setCurrentUser(user);
         setCurrentRole(role);
-        resetGameState(false);
-        setProjectForm(INITIAL_FORM);
         if (user.email === 'supervisor@constructor.co') {
           setView('supervisor');
         } else {
@@ -1290,10 +1326,10 @@ function resolverManifestacionComunidad() {
                     lastRealTickRef.current = Date.now();
                     startRef.current = Date.now();
                     gameStartedAtRef.current = Date.now();
-                    setElapsed('');
-                    setGameHourDisplay('');
+                    setElapsed('00:00:00');
+                    setGameHourDisplay('Día 1 - 07:00');
                     setWorkDays(0);
-                    setWorkTimeDisplay('');
+                    setWorkTimeDisplay('Día 1 - 07:00');
 
                     setLiveActs(projectForm.actividades.map(a => ({
                       ...a,
@@ -1375,7 +1411,7 @@ function resolverManifestacionComunidad() {
               )}
 
               <button
-                onClick={async () => { await saveGameState(); await supabase.auth.signOut(); window.location.reload(); }}
+                onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setView('login'); }}
                 style={{ padding:'12px 18px', borderRadius:'12px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'15px' }}
               >
                 Guardar y salir
@@ -1706,7 +1742,7 @@ function resolverManifestacionComunidad() {
           ← Volver al panel
         </button>
         )}
-        <button onClick={async () => { await saveGameState(); await supabase.auth.signOut(); window.location.reload(); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
+        <button onClick={async () => { await saveGameState(); await supabase.auth.signOut(); setCurrentUser(null); setCurrentRole('player'); setViewingAsPlayer(null); setView('login'); }} style={{ padding:'10px 14px', borderRadius:'10px', border:'none', background:'#dc2626', color:'#fff', fontWeight:700, cursor:'pointer', fontSize:'12px' }}>
           Guardar y salir
         </button>
       </div>
