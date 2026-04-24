@@ -180,6 +180,13 @@ export default function App() {
           ...prev,
           pagosCols: cols,
           pagosGlobales: globales,
+          actividades: prev.actividades.map(a => {
+            const newPagos = { ...a.pagos };
+            for (const c of cols) {
+              if (!(c.id in newPagos)) newPagos[c.id] = 0;
+            }
+            return { ...a, pagos: newPagos };
+          }),
         }));
       } else if (!gameStarted) {
         setProjectForm(prev => ({
