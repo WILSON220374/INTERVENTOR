@@ -293,7 +293,7 @@ export default function SupervisorDashboard({ currentUser, onLogout, onViewGame 
                   <input
                     value={newPaymentAmount}
                     onChange={e => setNewPaymentAmount(e.target.value)}
-                    placeholder="Monto (millones)"
+                    placeholder="Monto (pesos)"
                     type="number"
                     style={{
                       width: '150px',
@@ -338,7 +338,7 @@ export default function SupervisorDashboard({ currentUser, onLogout, onViewGame 
                     }}
                   >
                     <span style={{ fontSize: '14px' }}>
-                      {pay.payment_label} — <strong style={{ color: '#4ade80' }}>${pay.amount.toLocaleString('es-CO')}M</strong>
+                      {pay.payment_label} — <strong style={{ color: '#4ade80' }}>${pay.amount.toLocaleString('es-CO')}</strong>
                     </span>
                     <button
                       onClick={() => deletePayment(pay.id)}

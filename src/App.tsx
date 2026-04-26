@@ -27,6 +27,7 @@ interface ActivityRow {
   invertido: number;
   baseWorkDay: number;
   baseInvertido: number;
+  completada: boolean;
   pagos: Record<string, number>;
 }
 
@@ -66,6 +67,7 @@ const INITIAL_FORM: ProjectFormState = {
     invertido: 0,
     baseWorkDay: 0,
     baseInvertido: 0,
+    completada: false,
     pagos: { anticipo: 0 },
   }],
 };
@@ -317,6 +319,7 @@ export default function App() {
         activa: old?.activa ?? act.activa,
         baseWorkDay: old?.baseWorkDay ?? 0,
         baseInvertido: old?.baseInvertido ?? 0,
+        completada: old?.completada ?? false,
       };
     })
   );
@@ -512,22 +515,34 @@ export default function App() {
             const dur = Number(act.duracion) || 0;
             const valorAct = Number(act.valor) || 0;
             const asignado = Number(act.asignado) || 0;
-            
+
+            // Si la actividad ya estaba completada, no se recalcula.
+            if (act.completada) {
+              totalSpent += Number(act.invertido) || 0;
+              return act;
+            }
+
             if (!act.nombre || dur <= 0 || valorAct <= 0 || asignado <= 0 || !act.activa) {
               totalSpent += Number(act.invertido) || 0;
               return act;
             }
             
-            const valorDia = valorAct / (Number(data.projectForm?.contratoDuracion) || dur);
+            // Mismo cálculo que en el ticker en vivo: ritmo propio de la actividad,
+            // topeado por su asignación y por su valor total (no se pasa del 100%).
+            const valorDia = valorAct / dur;
             const diasNuevos = Math.max(0, newEffWorkDays - (act.baseWorkDay || 0));
             const invertidoBase = Number(act.baseInvertido) || 0;
-            let newInvertido = Math.min(asignado, invertidoBase + (valorDia * diasNuevos));
-            
+            let newInvertido = Math.min(asignado, valorAct, invertidoBase + (valorDia * diasNuevos));
+            const llegoAlTope = newInvertido >= valorAct;
+
             totalSpent += newInvertido;
             return {
               ...act,
               invertido: Number(newInvertido.toFixed(2)),
               avance: Math.min(100, Number(((newInvertido / valorAct) * 100).toFixed(1))),
+              completada: llegoAlTope,
+              baseInvertido: llegoAlTope ? valorAct : (act as any).baseInvertido,
+              baseWorkDay: llegoAlTope ? newEffWorkDays : (act as any).baseWorkDay,
             };
           });
           
@@ -951,11 +966,18 @@ function resolverManifestacionComunidad() {
         }
 
         setLiveActs(prev =>
-          prev.map(act => ({
-            ...act,
-            baseWorkDay: Number(act.invertido) < Number(act.asignado) ? workDays : act.baseWorkDay,
-            baseInvertido: Number(act.invertido) < Number(act.asignado) ? act.invertido : act.baseInvertido,
-          }))
+          prev.map(act => {
+            // Las actividades ya completadas no se tocan jamás.
+            if (act.completada) return act;
+            // Solo se reinicia el ancla de tiempo si la actividad efectivamente
+            // tiene saldo nuevo para gastar (asignado > invertido actual).
+            const tieneSaldoNuevo = Number(act.invertido) < Number(act.asignado);
+            return {
+              ...act,
+              baseWorkDay: tieneSaldoNuevo ? workDays : act.baseWorkDay,
+              baseInvertido: tieneSaldoNuevo ? act.invertido : act.baseInvertido,
+            };
+          })
         );
 
         setRecursosAgotados(false);
@@ -1045,7 +1067,6 @@ function resolverManifestacionComunidad() {
       const totalPagos = totalPagosGlobales();
       const totalAsignado = totalAsignadoGeneral();
       const topeGlobalDisponible = Math.min(totalPagos, totalAsignado);
-      const contratoTotal = Number(projectForm.contratoValor) || 0;
 
       setLiveActs(prev => {
         let totalSpent = 0;
@@ -1054,6 +1075,14 @@ function resolverManifestacionComunidad() {
           const dur = Number(act.duracion) || 0;
           const valorAct = Number(act.valor) || 0;
           const asignado = Number(act.asignado) || 0;
+
+          // PROTECCIÓN CONTRA REINICIO: si la actividad ya llegó al 100% en algún
+          // momento anterior, queda blindada. No importa qué pase con los pagos
+          // posteriores, su invertido y avance se mantienen intactos.
+          if (act.completada) {
+            totalSpent += Number(act.invertido) || 0;
+            return act;
+          }
 
           if (!act.nombre || dur <= 0 || valorAct <= 0 || asignado <= 0 || !act.activa) {
             totalSpent += Number(act.invertido) || 0;
@@ -1064,16 +1093,26 @@ function resolverManifestacionComunidad() {
             };
           }
 
-          const contratoDur = Number(projectForm.contratoDuracion) || dur;
-          const valorDiaActividad = valorAct / contratoDur;
+          // El ritmo de avance de cada actividad es PROPIO de la actividad,
+          // NO depende de la duración del contrato.
+          // Ejemplo: si una actividad vale $15.000 y su duración es 10 días,
+          // su ritmo de avance es $1.500 por día de obra efectiva.
+          // La actividad solo se detiene cuando alcanza su valor total (100%)
+          // o cuando se le acaba el dinero asignado del anticipo.
+          const valorDiaActividad = valorAct / dur;
           const diasNuevos = Math.max(0, effWorkDays - (act.baseWorkDay || 0));
           const invertidoBase = Number(act.baseInvertido) || 0;
 
           let newInvertido = Math.min(
-            asignado,
-            invertidoBase + (valorDiaActividad * diasNuevos)
+            asignado,        // tope: lo que el jugador asignó del anticipo
+            valorAct,        // tope: el valor total de la actividad (no se pasa del 100%)
+            invertidoBase + (valorDiaActividad * diasNuevos)  // ritmo natural
           );
           let newAvance = Math.min(100, (newInvertido / valorAct) * 100);
+
+          // Si llegó al 100%, marcarla como completada y "anclar" sus valores
+          // para que ningún recálculo posterior la afecte.
+          const llegoAlTope = newInvertido >= valorAct;
 
           totalSpent += newInvertido;
 
@@ -1081,6 +1120,11 @@ function resolverManifestacionComunidad() {
             ...act,
             avance: Number(newAvance.toFixed(1)),
             invertido: Number(newInvertido.toFixed(2)),
+            completada: llegoAlTope,
+            // Si quedó completada, fijamos las anclas en su valor final
+            // para preservar el estado incluso si algo intentara recalcularla.
+            baseInvertido: llegoAlTope ? valorAct : act.baseInvertido,
+            baseWorkDay: llegoAlTope ? effWorkDays : act.baseWorkDay,
           };
         });
 
@@ -1092,6 +1136,8 @@ function resolverManifestacionComunidad() {
             if (faltante <= 0) break;
             const actual = updated[i];
             if (actual.invertido <= 0) continue;
+            // Las actividades completadas no se recortan jamás.
+            if (actual.completada) continue;
 
             const descuento = Math.min(actual.invertido, faltante);
             const invertidoAjustado = actual.invertido - descuento;
@@ -1110,7 +1156,13 @@ function resolverManifestacionComunidad() {
           totalSpent = topeGlobalDisponible;
         }
 
-        const avanceGeneral = contratoTotal > 0 ? Math.min(100, (totalSpent / contratoTotal) * 100) : 0;
+        // Avance general del contrato = invertido total en todas las actividades
+        // dividido por el valor del contrato.
+        // Ejemplo: contrato $761M, actividad LOCALIZACION lleva $95K → avance ~0.012%.
+        // Como el código valida en la configuración que (suma de actividades = valor del contrato),
+        // este porcentaje refleja realísticamente cuánto se ha ejecutado del proyecto total.
+        const valorContrato = Number(projectForm.contratoValor) || 0;
+        const avanceGeneral = valorContrato > 0 ? Math.min(100, (totalSpent / valorContrato) * 100) : 0;
 
         const actividadesDelProyecto = updated.filter(a => a.nombre && Number(a.valor) > 0);
         const obraTerminadaAhora =
@@ -1280,6 +1332,9 @@ function resolverManifestacionComunidad() {
           activa: true,
           avance: 0,
           invertido: 0,
+          baseWorkDay: 0,
+          baseInvertido: 0,
+          completada: false,
           pagos: Object.fromEntries(p.pagosCols.map(col => [col.id, 0])),
         }
       ]
@@ -1335,7 +1390,15 @@ function resolverManifestacionComunidad() {
   const totalPagos = totalPagosGlobales();
   const asigTotal = totalAsignadoGeneral();
   const hayActividadesConRecursos = projectForm.actividades.some(a => Number(a.asignado) > 0);
-  const canStart = actividadesOk && !!projectForm.proyectoNombre && !!projectForm.contratistaNombre && totalPagos > 0 && hayActividadesConRecursos;
+  // Toda actividad con nombre y valor > 0 debe tener duración > 0.
+  // Si no, no avanzaría nunca y el avance general nunca llegaría al 100%.
+  const todasLasDuracionesValidas = projectForm.actividades.every(a => {
+    const tieneNombre = !!a.nombre && a.nombre.trim().length > 0;
+    const tieneValor = Number(a.valor) > 0;
+    if (!tieneNombre && !tieneValor) return true; // fila vacía no cuenta
+    return Number(a.duracion) > 0;
+  });
+  const canStart = actividadesOk && !!projectForm.proyectoNombre && !!projectForm.contratistaNombre && totalPagos > 0 && hayActividadesConRecursos && todasLasDuracionesValidas;
 
   if (view === 'login') {
     return (
@@ -1487,6 +1550,12 @@ function resolverManifestacionComunidad() {
                 </div>
               )}
 
+              {!gameStarted && hayActividadesConRecursos && !todasLasDuracionesValidas && (
+                <div style={{ fontSize:'11px', color:'#fca5a5', maxWidth:'280px', textAlign:'right' }}>
+                  Toda actividad con valor o nombre debe tener una duración mayor a 0 días.
+                </div>
+              )}
+
               <button
                 onClick={() => {
                   if (!gameStarted) return;
@@ -1586,14 +1655,29 @@ function resolverManifestacionComunidad() {
               <div>Actividad</div><div>Valor</div><div>Duración (días)</div><div></div>
             </div>
 
-            {projectForm.actividades.map(act => (
+            {projectForm.actividades.map(act => {
+              const tieneNombre = !!act.nombre && act.nombre.trim().length > 0;
+              const tieneValor = Number(act.valor) > 0;
+              const duracionInvalida = (tieneNombre || tieneValor) && Number(act.duracion) <= 0;
+              return (
               <div key={act.id} style={{ display:'grid', gridTemplateColumns:'2fr 1fr 1fr 50px', gap:'10px', marginBottom:'8px' }}>
                 <input value={act.nombre} onChange={e => updateAct(act.id, 'nombre', e.target.value)} placeholder="Nombre" style={IS} />
                 <input value={act.valor} onChange={e => updateAct(act.id, 'valor', e.target.value)} placeholder="0" style={IS} />
-                <input value={act.duracion} onChange={e => updateAct(act.id, 'duracion', e.target.value)} placeholder="0" style={IS} />
+                <input
+                  value={act.duracion}
+                  onChange={e => updateAct(act.id, 'duracion', e.target.value)}
+                  placeholder="0"
+                  style={{
+                    ...IS,
+                    border: duracionInvalida ? '1px solid #ef4444' : (IS as any).border,
+                    background: duracionInvalida ? '#3f1111' : (IS as any).background,
+                  }}
+                  title={duracionInvalida ? 'La duración debe ser mayor a 0 días' : ''}
+                />
                 <button onClick={() => removeAct(act.id)} disabled={projectForm.actividades.length === 1} style={{ ...BS, border:'1px solid #7f1d1d', background:projectForm.actividades.length === 1 ? '#3f3f46' : '#3f1111', opacity:projectForm.actividades.length === 1 ? 0.5 : 1, padding:'8px' }}>✕</button>
               </div>
-            ))}
+              );
+            })}
 
             <div style={{ marginTop:'14px', paddingTop:'12px', borderTop:'1px solid #334155', display:'flex', justifyContent:'space-between', fontWeight:700 }}>
               <span>Total actividades</span>
@@ -1699,6 +1783,8 @@ function resolverManifestacionComunidad() {
                         }, 0);
 
                         const maxDisponibleColumna = Math.max(0, (Number(projectForm.pagosGlobales[col.id]) || 0) - totalOtrasActividades);
+                        const valorActual = Number(act.pagos?.[col.id]) || 0;
+                        const enTope = valorActual > 0 && valorActual >= maxDisponibleColumna;
 
                         return (
                           <td key={col.id} style={{ padding:'8px 10px', borderBottom:'1px solid #1e293b' }}>
@@ -1707,9 +1793,10 @@ function resolverManifestacionComunidad() {
                               onChange={e => updatePagoActividad(act.id, col.id, e.target.value)}
                               placeholder="0"
                               style={{ ...IS, textAlign:'right', padding:'8px 10px' }}
+                              title={enTope ? `Tope alcanzado para esta columna (${maxDisponibleColumna.toLocaleString('es-CO')})` : ''}
                             />
-                            <div style={{ fontSize:'10px', color:'#64748b', textAlign:'right', marginTop:'4px' }}>
-                              Disp: {maxDisponibleColumna.toLocaleString('es-CO')}
+                            <div style={{ fontSize:'10px', color: enTope ? '#fca5a5' : '#64748b', textAlign:'right', marginTop:'4px' }}>
+                              Disp: {maxDisponibleColumna.toLocaleString('es-CO')}{enTope ? ' (tope)' : ''}
                             </div>
                           </td>
                         );
@@ -1726,7 +1813,7 @@ function resolverManifestacionComunidad() {
             <div style={{ marginTop:'14px', paddingTop:'12px', borderTop:'1px solid #334155', display:'flex', justifyContent:'space-between', fontWeight:700 }}>
               <span>Total recursos asignados</span>
               <span style={{ color:asigTotal > totalPagos ? '#ef4444' : '#4ade80' }}>
-                ${asigTotal.toLocaleString('es-CO')}M / ${totalPagos.toLocaleString('es-CO')}M
+                ${asigTotal.toLocaleString('es-CO')} / ${totalPagos.toLocaleString('es-CO')}
               </span>
             </div>
           </div>
@@ -2193,7 +2280,7 @@ function resolverManifestacionComunidad() {
                     <span style={{ fontSize:'11px' }}>{act.avance}%</span>
                   </div>
                 </td>
-                <td style={{ padding:'5px 6px', borderBottom:'1px solid #1e293b', textAlign:'right', color:'#60a5fa' }}>${act.invertido.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}M</td>
+                <td style={{ padding:'5px 6px', borderBottom:'1px solid #1e293b', textAlign:'right', color:'#60a5fa' }}>${act.invertido.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
               </tr>
             ))}
           </tbody>
@@ -2201,7 +2288,7 @@ function resolverManifestacionComunidad() {
 
         <div style={{ borderTop:'1px solid #334155', marginTop:'8px', paddingTop:'8px', display:'flex', justifyContent:'space-between', fontWeight:700, fontSize:'12px' }}>
           <span>Invertido total</span>
-          <span style={{ color:'#60a5fa' }}>${totalInv.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}M / ${Math.min(totalPagos, asigTotal).toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}M</span>
+          <span style={{ color:'#60a5fa' }}>${totalInv.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / ${Math.min(totalPagos, asigTotal).toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
       </div>
 
