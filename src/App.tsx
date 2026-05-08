@@ -556,8 +556,14 @@ export default function App() {
             const allPagosSum = Object.values(formAct?.pagos || {}).reduce((s: number, v: any) => s + (Number(v) || 0), 0);
             const asignado = Math.max(liveAsignado, formAsignado, allPagosSum);
 
-            // Si la actividad ya estaba completada, no se recalcula.
-            if (act.completada) {
+            // RECUPERACIÓN: si la actividad está marcada como completada pero
+            // su invertido es muy menor al valor (e.g., el viejo cap reduction
+            // la bajó pero no le quitó el completada), la "descompletamos" para
+            // que el simulador la recalcule.
+            const looksFalselyCompleted = act.completada && (Number(act.invertido) || 0) < valorAct * 0.99;
+
+            // Si la actividad ya estaba completada (de verdad), no se recalcula.
+            if (act.completada && !looksFalselyCompleted) {
               totalSpent += Number(act.invertido) || 0;
               return act;
             }
@@ -566,15 +572,16 @@ export default function App() {
               totalSpent += Number(act.invertido) || 0;
               return act;
             }
-            
+
             // Mismo cálculo que en el ticker en vivo: ritmo propio de la actividad,
             // topeado por su asignación y por su valor total (no se pasa del 100%).
             // RECUPERACIÓN: si el asignado estaba corrupto (0 en liveActs pero
-            // recuperado desde formAct), también reseteamos baseWorkDay y
-            // baseInvertido para permitir re-simular el progreso perdido desde 0.
-            // Sin esto, la actividad arranca desde el último "ancla" corrupto y
-            // crece desde 0 muy lentamente.
-            const wasCorrupted = liveAsignado === 0 && asignado > 0;
+            // recuperado desde formAct), o si la actividad estaba falsamente
+            // completada, reseteamos baseWorkDay y baseInvertido para permitir
+            // re-simular el progreso perdido desde 0. Sin esto, la actividad
+            // arranca desde el último "ancla" corrupto y crece desde 0 muy
+            // lentamente.
+            const wasCorrupted = (liveAsignado === 0 && asignado > 0) || looksFalselyCompleted;
             const effectiveBaseWorkDay = wasCorrupted ? 0 : (act.baseWorkDay || 0);
             const effectiveBaseInvertido = wasCorrupted ? 0 : (Number(act.baseInvertido) || 0);
 
