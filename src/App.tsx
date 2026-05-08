@@ -569,10 +569,18 @@ export default function App() {
             
             // Mismo cálculo que en el ticker en vivo: ritmo propio de la actividad,
             // topeado por su asignación y por su valor total (no se pasa del 100%).
+            // RECUPERACIÓN: si el asignado estaba corrupto (0 en liveActs pero
+            // recuperado desde formAct), también reseteamos baseWorkDay y
+            // baseInvertido para permitir re-simular el progreso perdido desde 0.
+            // Sin esto, la actividad arranca desde el último "ancla" corrupto y
+            // crece desde 0 muy lentamente.
+            const wasCorrupted = liveAsignado === 0 && asignado > 0;
+            const effectiveBaseWorkDay = wasCorrupted ? 0 : (act.baseWorkDay || 0);
+            const effectiveBaseInvertido = wasCorrupted ? 0 : (Number(act.baseInvertido) || 0);
+
             const valorDia = valorAct / dur;
-            const diasNuevos = Math.max(0, newEffWorkDays - (act.baseWorkDay || 0));
-            const invertidoBase = Number(act.baseInvertido) || 0;
-            let newInvertido = Math.min(asignado, valorAct, invertidoBase + (valorDia * diasNuevos));
+            const diasNuevos = Math.max(0, newEffWorkDays - effectiveBaseWorkDay);
+            let newInvertido = Math.min(asignado, valorAct, effectiveBaseInvertido + (valorDia * diasNuevos));
             const llegoAlTope = newInvertido >= valorAct;
 
             totalSpent += newInvertido;
