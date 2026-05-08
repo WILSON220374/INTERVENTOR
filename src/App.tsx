@@ -531,14 +531,30 @@ export default function App() {
         if (data.liveActs) {
           const totalPagos = data.projectForm?.pagosCols?.reduce((sum: number, col: any) => 
             sum + (Number(data.projectForm.pagosGlobales?.[col.id]) || 0), 0) || 0;
-          const totalAsignado = data.liveActs.reduce((sum: number, a: any) => sum + (Number(a.asignado) || 0), 0);
+          // Usar asignado recuperado (igual que en la simulación per-actividad
+          // de abajo) para que el cap del tope global sea correcto.
+          const totalAsignado = data.liveActs.reduce((sum: number, a: any) => {
+            const formAct = data.projectForm?.actividades?.find((f: any) => f.id === a.id);
+            const liveA = Number(a.asignado) || 0;
+            const formA = Number(formAct?.asignado) || 0;
+            const sumA = Object.values(formAct?.pagos || {}).reduce((s: number, v: any) => s + (Number(v) || 0), 0);
+            return sum + Math.max(liveA, formA, sumA);
+          }, 0);
           const topeGlobal = Math.min(totalPagos, totalAsignado);
           
           let totalSpent = 0;
           const simulatedActs = data.liveActs.map((act: any) => {
             const dur = Number(act.duracion) || 0;
             const valorAct = Number(act.valor) || 0;
-            const asignado = Number(act.asignado) || 0;
+            // Recuperación: si el asignado de liveActs quedó en 0 (corrupción
+            // por cambio de IDs de pagos), usar el de projectForm.actividades
+            // que se mantiene desde que el estudiante asignó originalmente.
+            // También sumar todos los valores de pagos por si están bajo IDs viejos.
+            const formAct = data.projectForm?.actividades?.find((f: any) => f.id === act.id);
+            const liveAsignado = Number(act.asignado) || 0;
+            const formAsignado = Number(formAct?.asignado) || 0;
+            const allPagosSum = Object.values(formAct?.pagos || {}).reduce((s: number, v: any) => s + (Number(v) || 0), 0);
+            const asignado = Math.max(liveAsignado, formAsignado, allPagosSum);
 
             // Si la actividad ya estaba completada, no se recalcula.
             if (act.completada) {
