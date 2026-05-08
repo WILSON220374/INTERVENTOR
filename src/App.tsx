@@ -462,7 +462,7 @@ export default function App() {
     saveGameState();
   }
 
-  function loadGameState(data: any) {
+  async function loadGameState(data: any, userId?: string) {
     if (!data) return;
     loadedRef.current = true;
     if (data.projectForm) setProjectForm(data.projectForm);
@@ -488,8 +488,28 @@ export default function App() {
     const savedMs = data.accumulatedGameMs || 0;
     if (data.lastSavedAt && data.gameStarted && !data.obraFinished) {
       const offlineRealMs = Date.now() - data.lastSavedAt;
-      
-      if (data.suspended || data.recursosAgotados) {
+
+      // Detectar si hay alguna incidencia activa que suspendería el juego.
+      // Si la hay, tratamos TODO el tiempo offline como suspendido para no
+      // avanzar incorrectamente la obra mientras el supervisor mantenía la
+      // suspensión (e.g., lluvia se activó después del último guardado).
+      let hasActiveSuspendingIncident = false;
+      if (userId) {
+        try {
+          const { data: incidents } = await supabase
+            .from('game_incidents')
+            .select('incident_type, is_active')
+            .eq('user_id', userId);
+          hasActiveSuspendingIncident = !!incidents?.some(i =>
+            i.is_active &&
+            ['lluvia_intensa', 'manifestacion_comunidad', 'demora_materiales', 'accidente_obra', 'derrumbe'].includes(i.incident_type)
+          );
+        } catch {
+          // Si la consulta falla, seguir con el comportamiento normal.
+        }
+      }
+
+      if (data.suspended || data.recursosAgotados || hasActiveSuspendingIncident) {
         // Juego estaba detenido: NO avanzar obra, solo sumar tiempo suspendido
         suspendedTimeRef.current = (data.suspendedTime || 0) + offlineRealMs;
         accumulatedGameMsRef.current = savedMs + (offlineRealMs * 10);
@@ -550,15 +570,27 @@ export default function App() {
             };
           });
           
-          // Si excede el tope, recortar
+          // Si excede el tope, recortar SOLO actividades NO completadas.
+          // Las completadas tienen su avance "anclado" y no se deben tocar
+          // (mismo comportamiento que el ticker en vivo).
           if (totalSpent > topeGlobal && topeGlobal > 0) {
-            const ratio = topeGlobal / totalSpent;
-            for (const act of simulatedActs) {
-              if (Number(act.invertido) > 0) {
-                act.invertido = Number((Number(act.invertido) * ratio).toFixed(2));
-                const valorAct = Number(act.valor) || 1;
-                act.avance = Math.min(100, Number(((act.invertido / valorAct) * 100).toFixed(1)));
-              }
+            const exceso = totalSpent - topeGlobal;
+            let faltante = exceso;
+            for (let i = simulatedActs.length - 1; i >= 0; i--) {
+              if (faltante <= 0) break;
+              const actual = simulatedActs[i];
+              if (Number(actual.invertido) <= 0) continue;
+              if (actual.completada) continue;
+              const descuento = Math.min(Number(actual.invertido), faltante);
+              const invertidoAjustado = Number(actual.invertido) - descuento;
+              const valorAct = Number(actual.valor) || 1;
+              const avanceAjustado = Math.min(100, (invertidoAjustado / valorAct) * 100);
+              simulatedActs[i] = {
+                ...actual,
+                invertido: Number(invertidoAjustado.toFixed(2)),
+                avance: Number(avanceAjustado.toFixed(1)),
+              };
+              faltante -= descuento;
             }
             // La obra se detuvo por recursos
             suspendStartRef.current = Date.now();
@@ -724,7 +756,17 @@ function resolverManifestacionComunidad() {
         prev.map(act => {
           const formAct = projectForm.actividades.find(a => a.id === act.id);
           if (!formAct) return act;
-          const asignado = projectForm.pagosCols.reduce((sum, col) => sum + (Number(formAct.pagos?.[col.id]) || 0), 0);
+          const calculatedAsignado = projectForm.pagosCols.reduce((sum, col) => sum + (Number(formAct.pagos?.[col.id]) || 0), 0);
+          // SAFEGUARD: si el cálculo da 0 pero antes había un asignado, conservarlo.
+          // Esto previene la pérdida de progreso cuando los IDs de pagosCols cambian
+          // (e.g., supervisor borra y recrea un pago) y los valores quedan huérfanos
+          // bajo IDs viejos. También recupera asignados perdidos en sesiones previas
+          // si formAct todavía tiene el valor correcto.
+          const previousAsignado = Number(act.asignado) || 0;
+          const formAsignado = Number(formAct.asignado) || 0;
+          const asignado = (calculatedAsignado === 0 && (previousAsignado > 0 || formAsignado > 0))
+            ? Math.max(previousAsignado, formAsignado)
+            : calculatedAsignado;
           return { ...act, asignado };
         })
       );
@@ -1428,7 +1470,7 @@ function resolverManifestacionComunidad() {
               .update({ is_reset: false, updated_at: new Date().toISOString() })
               .eq('user_id', user.id);
           } else if (stateRow?.project_data && stateRow.project_data.gameStarted !== undefined) {
-            loadGameState(stateRow.project_data);
+            await loadGameState(stateRow.project_data, user.id);
           }
           setView('setup');
         }
@@ -1458,10 +1500,10 @@ function resolverManifestacionComunidad() {
             .eq('user_id', player.id)
             .maybeSingle();
           if (stateRow?.project_data && stateRow.project_data.gameStarted !== undefined) {
-            loadGameState(stateRow.project_data);
+            await loadGameState(stateRow.project_data, player.id);
             setView('game');
           } else if (stateRow?.project_data?.projectForm) {
-            loadGameState(stateRow.project_data);
+            await loadGameState(stateRow.project_data, player.id);
             setView('setup');
           } else {
             setView('setup');
