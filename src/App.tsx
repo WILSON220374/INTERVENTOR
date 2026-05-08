@@ -476,7 +476,35 @@ export default function App() {
     if (data.obraFinished !== undefined) setObraFinished(data.obraFinished);
     if (data.recursosAgotados !== undefined) setRecursosAgotados(data.recursosAgotados);
     if (data.timeScale !== undefined) setTimeScale(data.timeScale);
-    if (data.liveActs) setLiveActs(data.liveActs);
+
+    // MIGRACIÓN: si las actividades vivas perdieron sus nombres/datos por
+    // corrupción anterior, pero el formulario los tiene intactos, reconstruir
+    // las actividades vivas a partir del formulario, preservando el progreso
+    // que aún esté guardado por id.
+    let liveActsToLoad = data.liveActs;
+    if (data.projectForm?.actividades && Array.isArray(data.projectForm.actividades)) {
+      const liveHasNames = Array.isArray(data.liveActs) && data.liveActs.some((a: any) => a?.nombre && String(a.nombre).trim());
+      const formHasNames = data.projectForm.actividades.some((a: any) => a?.nombre && String(a.nombre).trim());
+      if (!liveHasNames && formHasNames) {
+        liveActsToLoad = data.projectForm.actividades.map((formAct: any) => {
+          const liveMatch = Array.isArray(data.liveActs) ? data.liveActs.find((l: any) => l?.id === formAct.id) : null;
+          return {
+            ...formAct,
+            asignado: Number(formAct.asignado) || 0,
+            avance: Number(liveMatch?.avance) || 0,
+            invertido: Number(liveMatch?.invertido) || 0,
+            activa: liveMatch?.activa !== false,
+            baseInvertido: Number(liveMatch?.baseInvertido) || 0,
+            baseWorkDay: Number(liveMatch?.baseWorkDay) || 0,
+            completada: !!liveMatch?.completada,
+          };
+        });
+        // También reemplazamos data.liveActs para que la simulación offline
+        // de abajo use las actividades migradas, no las corruptas originales.
+        data = { ...data, liveActs: liveActsToLoad };
+      }
+    }
+    if (liveActsToLoad) setLiveActs(liveActsToLoad);
     if (data.suspendedTime !== undefined) suspendedTimeRef.current = data.suspendedTime;
     if (data.cambiosContratoValor !== undefined) cambiosContratoValorRef.current = data.cambiosContratoValor;
     if (data.cambiosContratoDuracion !== undefined) cambiosContratoDuracionRef.current = data.cambiosContratoDuracion;
