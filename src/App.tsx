@@ -493,6 +493,10 @@ export default function App() {
         // Juego estaba detenido: NO avanzar obra, solo sumar tiempo suspendido
         suspendedTimeRef.current = (data.suspendedTime || 0) + offlineRealMs;
         accumulatedGameMsRef.current = savedMs + (offlineRealMs * 10);
+        // Anclar suspendStart al momento actual para que el ticker calcule
+        // suspTime = Date.now() - suspendStartRef.current + suspendedTimeRef.current
+        // correctamente (sin este ancla, Date.now() - 0 produce un número enorme).
+        suspendStartRef.current = Date.now();
       } else {
         // Juego estaba corriendo: avanzar normalmente
         const newGameMs = savedMs + (offlineRealMs * 10);
