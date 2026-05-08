@@ -482,6 +482,7 @@ export default function App() {
     // las actividades vivas a partir del formulario, preservando el progreso
     // que aún esté guardado por id.
     let liveActsToLoad = data.liveActs;
+    let didMigration = false;
     if (data.projectForm?.actividades && Array.isArray(data.projectForm.actividades)) {
       const liveHasNames = Array.isArray(data.liveActs) && data.liveActs.some((a: any) => a?.nombre && String(a.nombre).trim());
       const formHasNames = data.projectForm.actividades.some((a: any) => a?.nombre && String(a.nombre).trim());
@@ -494,17 +495,31 @@ export default function App() {
             avance: Number(liveMatch?.avance) || 0,
             invertido: Number(liveMatch?.invertido) || 0,
             activa: liveMatch?.activa !== false,
-            baseInvertido: Number(liveMatch?.baseInvertido) || 0,
-            baseWorkDay: Number(liveMatch?.baseWorkDay) || 0,
-            completada: !!liveMatch?.completada,
+            baseInvertido: 0,
+            baseWorkDay: 0,
+            completada: false,
           };
         });
         // También reemplazamos data.liveActs para que la simulación offline
         // de abajo use las actividades migradas, no las corruptas originales.
-        data = { ...data, liveActs: liveActsToLoad };
+        // Forzamos suspended/recursosAgotados a false para que el simulador
+        // recalcule el invertido de las actividades migradas (basado en el
+        // tiempo de obra transcurrido). Si la suspensión sigue activa, el
+        // efecto de incidencias la volverá a aplicar después.
+        data = {
+          ...data,
+          liveActs: liveActsToLoad,
+          suspended: false,
+          recursosAgotados: false,
+        };
+        didMigration = true;
       }
     }
     if (liveActsToLoad) setLiveActs(liveActsToLoad);
+    if (didMigration) {
+      setSuspended(false);
+      setRecursosAgotados(false);
+    }
     if (data.suspendedTime !== undefined) suspendedTimeRef.current = data.suspendedTime;
     if (data.cambiosContratoValor !== undefined) cambiosContratoValorRef.current = data.cambiosContratoValor;
     if (data.cambiosContratoDuracion !== undefined) cambiosContratoDuracionRef.current = data.cambiosContratoDuracion;
@@ -537,7 +552,10 @@ export default function App() {
         }
       }
 
-      if (data.suspended || data.recursosAgotados || hasActiveSuspendingIncident) {
+      // Si hubo migración de actividades, FORZAMOS el path de simulación para
+      // recalcular el invertido de las actividades migradas, sin importar el
+      // estado de suspensión guardado.
+      if (!didMigration && (data.suspended || data.recursosAgotados || hasActiveSuspendingIncident)) {
         // Juego estaba detenido: NO avanzar obra, solo sumar tiempo suspendido
         suspendedTimeRef.current = (data.suspendedTime || 0) + offlineRealMs;
         accumulatedGameMsRef.current = savedMs + (offlineRealMs * 10);
