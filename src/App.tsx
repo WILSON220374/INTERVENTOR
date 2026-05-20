@@ -148,6 +148,8 @@ export default function App() {
   const lastRealTickRef = useRef(Date.now());
   const initialContratoValorRef = useRef<string | null>(null);
   const initialContratoDuracionRef = useRef<string | null>(null);
+  const initialActividadesCountRef = useRef<number | null>(null);
+  const initialTotalActsValueRef = useRef<number | null>(null);
   const cambiosContratoValorRef = useRef(0);
   const cambiosContratoDuracionRef = useRef(0);
   const fondoAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -335,6 +337,8 @@ export default function App() {
     startRef.current = Date.now();
     initialContratoValorRef.current = null;
     initialContratoDuracionRef.current = null;
+    initialActividadesCountRef.current = null;
+    initialTotalActsValueRef.current = null;
     cambiosContratoValorRef.current = 0;
     cambiosContratoDuracionRef.current = 0;
 
@@ -525,6 +529,10 @@ export default function App() {
     if (data.cambiosContratoDuracion !== undefined) cambiosContratoDuracionRef.current = data.cambiosContratoDuracion;
     if (data.projectForm?.contratoValor) initialContratoValorRef.current = data.projectForm.contratoValor;
     if (data.projectForm?.contratoDuracion) initialContratoDuracionRef.current = data.projectForm.contratoDuracion;
+    if (data.projectForm?.actividades) {
+      initialActividadesCountRef.current = data.projectForm.actividades.length;
+      initialTotalActsValueRef.current = data.projectForm.actividades.reduce((s: number, a: any) => s + (Number(a.valor) || 0), 0);
+    }
     if (data.gameStartedAt) gameStartedAtRef.current = data.gameStartedAt;
 
     // Calcular tiempo offline y avanzar el juego
@@ -828,9 +836,9 @@ function resolverManifestacionComunidad() {
 
   useEffect(() => {
     if (gameStarted) {
-      // Solo actualizar asignado, NUNCA tocar avance/invertido
-      setLiveActs(prev =>
-        prev.map(act => {
+      setLiveActs(prev => {
+        // Actualizar asignado de actividades existentes sin tocar avance/invertido
+        const updated = prev.map(act => {
           const formAct = projectForm.actividades.find(a => a.id === act.id);
           if (!formAct) return act;
           const calculatedAsignado = projectForm.pagosCols.reduce((sum, col) => sum + (Number(formAct.pagos?.[col.id]) || 0), 0);
@@ -845,8 +853,22 @@ function resolverManifestacionComunidad() {
             ? Math.max(previousAsignado, formAsignado)
             : calculatedAsignado;
           return { ...act, asignado };
-        })
-      );
+        });
+        // Agregar actividades nuevas que no estaban en liveActs al momento del inicio
+        const newActs = projectForm.actividades
+          .filter(a => !prev.find(p => p.id === a.id))
+          .map(a => ({
+            ...a,
+            asignado: projectForm.pagosCols.reduce((sum, col) => sum + (Number(a.pagos?.[col.id]) || 0), 0),
+            avance: 0,
+            invertido: 0,
+            activa: a.activa,
+            baseWorkDay: 0,
+            baseInvertido: 0,
+            completada: false,
+          }));
+        return [...updated, ...newActs];
+      });
       return;
     }
     syncLiveActsWithForm();
@@ -1658,6 +1680,8 @@ function resolverManifestacionComunidad() {
                     setDerrumbeResuelto(false);
                     initialContratoValorRef.current = projectForm.contratoValor;
                     initialContratoDuracionRef.current = projectForm.contratoDuracion;
+                    initialActividadesCountRef.current = projectForm.actividades.length;
+                    initialTotalActsValueRef.current = projectForm.actividades.reduce((s, a) => s + (Number(a.valor) || 0), 0);
                     setView('game');
                   }
                 }}
@@ -1689,6 +1713,23 @@ function resolverManifestacionComunidad() {
                   ) {
                     cambiosContratoValorRef.current += 1;
                     initialContratoValorRef.current = projectForm.contratoValor;
+                  }
+
+                  const currentTotalActs = projectForm.actividades.reduce((s, a) => s + (Number(a.valor) || 0), 0);
+                  if (
+                    initialTotalActsValueRef.current !== null &&
+                    currentTotalActs !== initialTotalActsValueRef.current
+                  ) {
+                    cambiosContratoValorRef.current += 1;
+                    initialTotalActsValueRef.current = currentTotalActs;
+                  }
+
+                  if (
+                    initialActividadesCountRef.current !== null &&
+                    projectForm.actividades.length !== initialActividadesCountRef.current
+                  ) {
+                    cambiosContratoValorRef.current += 1;
+                    initialActividadesCountRef.current = projectForm.actividades.length;
                   }
 
                   if (
