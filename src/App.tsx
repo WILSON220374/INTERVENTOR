@@ -515,6 +515,47 @@ export default function App() {
         didMigration = true;
       }
     }
+    // SANEAR duplicados: si liveActs tiene dos entradas con el mismo id
+    // (bug del commit 12e7f0f), conservar la de mayor avance.
+    if (Array.isArray(liveActsToLoad)) {
+      const seen = new Map<number, any>();
+      for (const act of liveActsToLoad) {
+        const prev = seen.get(act.id);
+        if (!prev || (Number(act.avance) || 0) > (Number(prev.avance) || 0)) {
+          seen.set(act.id, act);
+        }
+      }
+      liveActsToLoad = Array.from(seen.values());
+    }
+
+    // SANEAR actividades faltantes: si el formulario tiene actividades que no
+    // están en liveActs (añadidas mientras el juego corría pero no sincronizadas),
+    // añadirlas con avance 0 para que aparezcan en la obra.
+    if (
+      data.gameStarted &&
+      Array.isArray(liveActsToLoad) &&
+      Array.isArray(data.projectForm?.actividades)
+    ) {
+      const missing = data.projectForm.actividades.filter(
+        (fa: any) => !liveActsToLoad.find((la: any) => la.id === fa.id)
+      );
+      if (missing.length > 0) {
+        const toAdd = missing.map((a: any) => ({
+          ...a,
+          asignado: (data.projectForm.pagosCols ?? []).reduce(
+            (sum: number, col: any) => sum + (Number(a.pagos?.[col.id]) || 0), 0
+          ),
+          avance: 0,
+          invertido: 0,
+          activa: a.activa !== false,
+          baseWorkDay: 0,
+          baseInvertido: 0,
+          completada: false,
+        }));
+        liveActsToLoad = [...liveActsToLoad, ...toAdd];
+      }
+    }
+
     if (liveActsToLoad) setLiveActs(liveActsToLoad);
     if (didMigration) {
       setSuspended(false);
