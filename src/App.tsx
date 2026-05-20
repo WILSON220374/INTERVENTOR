@@ -580,6 +580,12 @@ export default function App() {
       }
     }
 
+    // Actualizar data.liveActs para que la simulación offline (más abajo) use
+    // las actividades ya saneadas y no las originales con duplicados.
+    if (liveActsToLoad && liveActsToLoad !== data.liveActs) {
+      data = { ...data, liveActs: liveActsToLoad };
+    }
+
     if (liveActsToLoad) setLiveActs(liveActsToLoad);
     if (didMigration) {
       setSuspended(false);
