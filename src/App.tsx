@@ -1597,6 +1597,13 @@ function resolverManifestacionComunidad() {
   if (view === 'login') {
     return (
       <LoginScreen onLogin={async (user, role) => {
+        // CRÍTICO: SIEMPRE limpiar el estado local antes de cargar el del nuevo
+        // usuario. Si no, datos de una sesión anterior (e.g. supervisor viendo
+        // otro grupo) se quedan en memoria y el auto-save los persiste a la
+        // fila del nuevo usuario, contaminando los datos entre grupos.
+        resetGameState(false);
+        setProjectForm(INITIAL_FORM);
+
         setCurrentUser(user);
         setCurrentRole(role);
         if (user.email === 'supervisor@constructor.co') {
@@ -1610,9 +1617,7 @@ function resolverManifestacionComunidad() {
             .maybeSingle();
 
           if (stateRow?.is_reset) {
-            // El supervisor reinició este grupo — empezar de cero
-            resetGameState(false);
-            setProjectForm(INITIAL_FORM);
+            // El supervisor reinició este grupo — ya quedó en cero por el reset de arriba
             await supabase
               .from('game_state')
               .update({ is_reset: false, updated_at: new Date().toISOString() })
